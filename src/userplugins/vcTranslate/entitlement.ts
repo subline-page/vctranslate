@@ -6,7 +6,7 @@ import * as DataStore from "@api/DataStore";
  * There is no free tier. An install is one of three things:
  *  - "none": nothing is translated; the activation notice is shown;
  *  - "automatic": ≈ Google on every message and surface, decoders, and five
- *    ✦ previews a day on rough ≈ lines;
+ *    ✦ previews a day from ⚡ in the hover toolbar;
  *  - "ai": the above plus ✦ on everything (relay, under the saved code).
  *
  * The relay is the authority and states `tokenExpiresAt` (7 days out) on every

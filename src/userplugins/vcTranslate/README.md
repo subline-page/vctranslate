@@ -78,9 +78,9 @@ the plugin asks at start and every 24 hours).
   Automatic, or enter a code (a server's promo code is redeemed on
   `/v1/redeem`; anything else is checked as a license key first).
 - **Automatic** ($4.99 once): ≈ Google on every message and surface (tight
-  surfaces show ≈ in place), local decoders, and five ✦ previews a day:
-  every ≈ line ends in "Preview ✦ (n left)", and a message with no ≈ line
-  (skipped, waiting, failed, not yet translated) offers it as ⚡ instead.
+  surfaces show ≈ in place), local decoders, and five ✦ previews a day: ⚡ in
+  the message hover toolbar reads "Preview ✦ (n left today)" on any message.
+  The ≈ line itself carries no control.
 - **AI** (monthly or annual, on top of Automatic): ✦ on everything, under the
   saved code.
 

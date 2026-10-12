@@ -7,7 +7,7 @@ import * as DataStore from "@api/DataStore";
  * install id the relay ties purchases, promo codes and the 3-computer limit
  * to (sent as `x-subline-install`, and as the credential when no code is
  * saved). HOW MANY ✦ previews are left today: an Automatic owner gets five a
- * day, one per ≈ line pressed (see index.tsx previewPress).
+ * day, one per ⚡ press (see index.tsx previewPress).
  *
  * Everything here is deliberately free of Discord and of the network, so the
  * count, the day rollover and the wording can be read and tested on their
@@ -330,7 +330,7 @@ export async function loadLocalTasteCount(): Promise<void> {
     } catch { /* a zero: the relay still guards */ }
 }
 
-/** One ✦ preview served under the taste allowance. */
+/** One ✦ served under the taste allowance (a preview or a ⚡ press). */
 export function noteTasteSpent(now: number = Date.now()): void {
     const day = relayDay(now);
     if (localDay !== day) { localDay = day; localUsed = 0; }
@@ -354,8 +354,8 @@ export function tasteExhausted(now: number = Date.now()): boolean {
     return (used !== null && used >= cap) || localUsedToday(now) >= Math.min(cap, TASTE_CAP);
 }
 
-// No toast when the day's previews are used: every ≈ line already counts
-// down to "Preview ✦ (0 left)", and a toast on top of it was a nag rather
+// No toast when the day's previews are used: the ⚡ label already counts
+// down and then reads "Add AI ✦", and a toast on top of it was a nag rather
 // than information.
 
 /** Test-only, same shape as cooldownStore's __resetCooldowns. */

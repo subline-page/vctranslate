@@ -23,6 +23,7 @@
  */
 
 import { cleanTranslation } from "../customEmoji";
+import { DECODED_TITLE, decodedPrefix, decodeMessage } from "../decode";
 import { IN_PLACE_COPY } from "../upgradeCopy";
 import { React } from "@webpack/common";
 
@@ -186,6 +187,33 @@ export function TranslatedInPlace({ original, translation, glyph = "✦" }: { or
     return (
         <span title={original} data-subline-surface="in-place">
             <span style={PREFIX_STYLE}>{glyph} </span><span dir={translationDir()}>{translation as any}</span>
+        </span>
+    );
+}
+
+/**
+ * A custom status written in a code (morse, binary, braille...): decoded on
+ * this computer, IN PLACE, as the reply bar shows a coded quote ("decoded ·
+ * morse · HELLO"). When the decoded text is in another language, its
+ * translation shows instead ("decoded · morse · ≈ hello"). The status as
+ * written is the tooltip. Null when the status holds no code.
+ */
+export function DecodedStatus({ text }: { text: string; }) {
+    useSurfaceUpdates();
+    const d = decodeMessage(text);
+    if (d === null) return null;
+    let t: ReturnType<typeof tightTranslation> = null;
+    try {
+        t = tightTranslation(d.translatable);
+    } catch {
+        t = null;
+    }
+    return (
+        <span title={`${text}\n${DECODED_TITLE}`} data-subline-surface="decoded">
+            <span style={PREFIX_STYLE}>{decodedPrefix(d.kind)}</span>
+            {t === null
+                ? d.text
+                : <><span style={PREFIX_STYLE}>{t.glyph} </span><span dir={translationDir()}>{t.text}</span></>}
         </span>
     );
 }

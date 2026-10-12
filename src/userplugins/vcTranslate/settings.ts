@@ -283,9 +283,7 @@ export const settings = definePluginSettings({
         // On by default so a fresh install works the moment it's enabled — no
         // channel to find, no button to discover. Only ever covers channels
         // with a guild_id; DMs and group DMs stay opt-in via the per-channel
-        // globe button regardless of this setting (see channelActive). Bios
-        // and custom statuses seen while a server is open follow the same rule
-        // (userTextAllowed in index.tsx); the DM list's do not.
+        // globe button regardless of this setting (see channelActive).
         displayName: SETTINGS_COPY.globalAuto.title,
         description: SETTINGS_COPY.globalAuto.description,
         default: true

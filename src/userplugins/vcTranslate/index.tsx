@@ -9,7 +9,7 @@ import { relaunch } from "@utils/native";
 import { copyToClipboard } from "@utils/clipboard";
 import {
     ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, Menu, MessageStore,
-    Parser, React, SelectedChannelStore, SelectedGuildStore, showToast, UserStore
+    Parser, React, SelectedChannelStore, showToast, UserStore
 } from "@webpack/common";
 import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import type { Message } from "@vencord/discord-types";
@@ -76,7 +76,7 @@ import {
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
 import {
-    BioInPlace, resetInPlaceFlips, safe, setSurfaceRtl, setSurfaceService, StatusBubbleText, SurfaceLines, tightTranslation, TightSwap,
+    BioInPlace, DecodedStatus, resetInPlaceFlips, safe, setSurfaceRtl, setSurfaceService, StatusBubbleText, SurfaceLines, tightTranslation, TightSwap,
     useSurfaceVersion
 } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
@@ -595,7 +595,7 @@ function modelFor(engine: EngineId): string {
  * ✦ (the relay) needs AI on the account. An Automatic owner's saved code is a
  * real Subline code, so the configured engine is "relay", but without AI there
  * is no quality tier for it: Google (≈) alone, plus the day's five ✦
- * previews on its ≈ lines (see previewPress). Everything that reads this
+ * previews from ⚡ (see previewPress). Everything that reads this
  * (the quality batcher, the ⚡ label, the chat-bar indicator) then treats an
  * Automatic owner as Google-only.
  */
@@ -635,7 +635,7 @@ function activated(): boolean {
 
 /**
  * An Automatic owner with no working ✦ tier: ≈ on everything, and five ✦
- * previews a day from its ≈ lines. An AI install whose code was rejected this
+ * previews a day from ⚡. An AI install whose code was rejected this
  * session (pinned to Google) is not this: it gets its own error, never a
  * preview nudge.
  */
@@ -1052,13 +1052,7 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
             ...(holder !== null ? { holder } : {})
         });
         noteRelayClock(res.serverNow, now);
-        if (res.previews !== undefined) {
-            const before = tasteRemaining();
-            recordTasteQuota(res.previews.used, res.previews.cap);
-            // Every ≈ line shows this count ("Preview ✦ (n left)"): redraw
-            // them all at once, so no line keeps the old number.
-            if (tasteRemaining() !== before) notifyForcedInFlight();
-        }
+        if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
     }
     if (res.grant === "early") earlyGrantPending = true;
     return saved || dropped;
@@ -2094,10 +2088,30 @@ function needsQuality(key: string): boolean {
     return true;   // failed / deferred — both tiers get another go
 }
 
+/**
+ * Has an LLM already had its say on this message — a real translation or an
+ * authoritative skip? Used only to decide whether the force-quality popover
+ * button (see `forceQualityPopoverRender`) has anything left to offer.
+ *
+ * Deliberately `needsQuality()` minus the `qualityAttempted` check: that
+ * ledger bounds AUTOMATIC re-attempts (catch-up re-offering the same message
+ * on every channel open), and the whole point of the button this feeds is to
+ * let the user override it by hand for a message whose one automatic attempt
+ * already failed. Only a verdict actually sitting in the store — the one
+ * thing forcing another request cannot improve on — closes the door here.
+ */
 /** The same text, ignoring case and whitespace: a forced answer that changed nothing. */
 export function sameText(a: string, b: string): boolean {
     const norm = (s: string) => s.toLocaleLowerCase().replace(/\s+/g, "");
     return norm(a) === norm(b);
+}
+
+function hasQualityVerdict(key: string): boolean {
+    const e = getTranslation(key);
+    if (e === undefined) return false;
+    if (isRealTranslation(e)) return ENGINE_RANK[e.via] >= 1;
+    if ("skipped" in e) return e.via !== undefined && ENGINE_RANK[e.via] >= 1;
+    return false;   // failed / deferred — still worth a forced attempt
 }
 
 /**
@@ -2806,8 +2820,14 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // hides the button in exactly this case, but the engine can change
     // between render and click, so check again rather than trust stale props.
     if (!isLlmEngine(engine)) {
-        // An Automatic owner's ⚡ never comes here: it calls previewPress
-        // directly (previewPopoverItem).
+        // ...unless this is an Automatic owner, where ⚡ asks for a ✦
+        // PREVIEW, one of the day's five.
+        // Checked after the engine, so an AI install pinned to Google by a
+        // rejected code still takes the branch below and gets its own error.
+        if (isAutomaticOnly()) {
+            await previewPress(message);
+            return;
+        }
         if (debug) logger.debug(`[force-quality] ${message.id}: blocked — no LLM engine usable right now`);
         return;
     }
@@ -2963,21 +2983,11 @@ function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, con
 }
 
 /**
- * Are today's previews used up, by either count (the relay's, or this
- * client's own)? The ONE test both the control's "0 left" and previewPress
- * use, so the number shown and what a press does can never disagree. A relay
- * that states a larger allowance still never makes "0 left" press through.
- */
-function previewsGone(): boolean {
-    return tasteExhausted() || tasteRemaining() === 0;
-}
-
-/**
- * An Automatic owner's ✦ preview of this message: from "Preview ✦" at the end
- * of its ≈ line (previewControl). Five a day, counted by the relay once per
- * message. With none left today a press opens Add AI and sends nothing.
+ * An Automatic owner's ✦ preview of this message, from ⚡ in the hover
+ * toolbar (the ≈ line itself carries no control). Five a day, counted by the
+ * relay once per message.
  *
- * Shows "✦ translating…" at once (forcedInFlight), and a second press while
+ * Shows "⚡ translating…" at once (forcedInFlight), and a second press while
  * it is out, or after it is done, sends nothing. Charged only once the relay
  * served it: a failure (relay down, a 5xx, a timeout, a failed row) leaves
  * the message free to be pressed again, and the relay counts a retry of the
@@ -2992,10 +3002,9 @@ async function previewPress(message: Message): Promise<void> {
     }
     if (previewTaken(message) || forcedInFlight.has(id)) return;
     if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
-    if (previewsGone()) {
+    if (tasteExhausted()) {
         // Today's five are used, so a press would send nothing. Offer the
-        // one thing that does help: the Add AI panel (while a payment is on
-        // its way, openUpgrade shows that instead).
+        // one thing that does help, as the ⚡ "Add AI ✦" label does.
         tasteLog(`${id}: no preview, today's ${tasteCap()} are used`);
         openUpgrade();
         return;
@@ -3012,7 +3021,7 @@ async function previewPress(message: Message): Promise<void> {
     } finally {
         previewPending.delete(id);
         forcedInFlight.delete(id);
-        if (!served && !previewsGone()) setForcedHint(id, { kind: "preview" });
+        if (!served && !tasteExhausted()) setForcedHint(id, { kind: "preview" });
         notifyForcedInFlight();
     }
 }
@@ -3998,122 +4007,6 @@ function previewLine(preview: PreviewResult) {
     );
 }
 
-/**
- * The slot at the end of an Automatic owner's ≈ line: "· Preview ✦ (4 left)".
- *
- * MATCHES THE LINE IT ENDS. Same size and italics as the line (inherited),
- * the muted token the " · Add AI" tail and the ≈ prefix use, the same " · "
- * joint. Hover and keyboard focus underline it and lift it to the line's own
- * text colour (inline styles cannot say :hover, so the handlers set it).
- *
- * NO LAYOUT SHIFT. Both faces, "Preview ✦ (n left)" and "✦ translating…",
- * sit in one grid cell, the idle one hidden, so the slot is always as wide
- * as the wider face: pressing it, and the answer failing, move nothing. The
- * count is one digit in tabular figures, so 5 → 0 moves nothing either. The
- * "· " and the control never wrap apart; the space before them is where a
- * long line breaks, so on a wrapped line the slot moves down whole.
- *
- * ONE COUNT. Every line reads tasteRemaining() on each draw, and everything
- * that changes it (a served preview, the relay's daily-limit answer, a
- * /v1/status count, a new UTC day) redraws every line (notifyForcedInFlight),
- * so no two lines ever show different numbers.
- *
- * At 0 left it still reads "Preview ✦ (0 left)" (honest and the same width)
- * and a press opens Add AI, which is what ⚡ offered at 0 before 0.2.4.
- */
-const PREVIEW_SLOT_STYLE = { color: "var(--text-muted)", whiteSpace: "nowrap" } as const;
-const PREVIEW_FACE_STYLE = { gridArea: "1 / 1", textDecoration: "inherit" } as const;
-/** The count the last drawn control showed, and whether a redraw of all of them is on its way. */
-let previewLeftShown: number | null = null;
-let previewRedrawQueued = false;
-
-function previewControl(message: Message, busy: boolean) {
-    // A new UTC day is a new five, so yesterday's "0 left" never outlives
-    // midnight on the line.
-    if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
-    const gone = previewsGone();
-    const n = gone ? 0 : tasteRemaining();
-    // A number can also change with nothing announcing it (the local count's
-    // UTC day turning over), and Discord redraws one message on its own (a
-    // hover). The first line to draw a new number redraws all the others,
-    // after this render, never during it.
-    if (previewLeftShown !== null && n !== previewLeftShown && !previewRedrawQueued) {
-        previewRedrawQueued = true;
-        setTimeout(() => { previewRedrawQueued = false; notifyForcedInFlight(); }, 0);
-    }
-    previewLeftShown = n;
-    const title = busy
-        ? UPGRADE_COPY.previewBusyTitle
-        : gone
-            // P4: while a payment is on its way, say that, not "Add AI".
-            ? (isPaymentPending() ? UPGRADE_COPY.paymentPending : UPGRADE_COPY.previewNoneTitle)
-            : UPGRADE_COPY.previewAskTitle.replace("{n}", String(n));
-    const press = (e: any) => {
-        try { e?.preventDefault?.(); e?.stopPropagation?.(); } catch { /* nothing to stop */ }
-        // The hover lift is set by hand, so it is taken off by hand: the
-        // "✦ translating…" face is not a thing to press.
-        const s = e?.currentTarget?.style;
-        if (s) { s.textDecoration = ""; s.color = ""; }
-        // previewPress itself refuses a second press while one is out, so a
-        // double click, or a press on a stale draw, spends one preview at most.
-        if (!busy) void previewPress(message);
-    };
-    const lift = (on: boolean) => (e: any) => {
-        const s = e?.currentTarget?.style;
-        if (!s) return;
-        s.textDecoration = on && !busy ? "underline" : "";
-        s.color = on && !busy ? TEXT_COLOUR : "";
-    };
-    return (
-        <>
-            {" "}
-            <span style={PREVIEW_SLOT_STYLE} data-subline-preview-slot="">
-                {"· "}
-                <span
-                    role="button"
-                    tabIndex={0}
-                    aria-label={title}
-                    aria-disabled={busy ? "true" : undefined}
-                    aria-busy={busy ? "true" : undefined}
-                    title={title}
-                    data-subline-preview-ask=""
-                    data-subline-preview-left={String(n)}
-                    style={{
-                        display: "inline-grid",
-                        cursor: busy ? "default" : "pointer",
-                        fontVariantNumeric: "tabular-nums",
-                        userSelect: "none"
-                    }}
-                    onClick={press}
-                    onKeyDown={(e: any) => {
-                        if (e?.key === "Enter" || e?.key === " " || e?.key === "Spacebar") press(e);
-                    }}
-                    onMouseEnter={lift(true)}
-                    onMouseLeave={lift(false)}
-                    onFocus={lift(true)}
-                    onBlur={lift(false)}
-                >
-                    <span style={{ ...PREVIEW_FACE_STYLE, visibility: busy ? "hidden" : "visible" }} aria-hidden="true">
-                        {UPGRADE_COPY.previewAsk.replace("{n}", String(n))}
-                    </span>
-                    <span style={{ ...PREVIEW_FACE_STYLE, visibility: busy ? "visible" : "hidden" }} aria-hidden="true">
-                        {UPGRADE_COPY.previewBusy}
-                    </span>
-                </span>
-            </span>
-        </>
-    );
-}
-
-/**
- * What a press that is still out says. ⚡ on an AI install; on an Automatic
- * install there is no ⚡, only Preview ✦, so the same state reads as the
- * preview control does.
- */
-function forcingText(): string {
-    return isAutomaticOnly() ? UPGRADE_COPY.previewBusy : "⚡ translating…";
-}
-
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -4197,7 +4090,7 @@ function translationLines(message: Message) {
         if (forcing) {
             return (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                    {forcingText()}
+                    ⚡ translating…
                 </div>
             );
         }
@@ -4223,14 +4116,14 @@ function translationLines(message: Message) {
     // catch-up can tell "resolved, nothing to show" from "never requested", and
     // falling through would label a perfectly fine message "translation
     // failed". Same "nothing to show, but a forced click just changed that"
-    // exception as the no-entry branch above: an AI install keeps ⚡ on a
-    // Google-only skip (see forceQualityPopoverRender), so this is a real,
-    // reachable state, not a dead one.
+    // exception as the no-entry branch above: `hasQualityVerdict()` still
+    // offers ⚡ on a Google-only skip (see forceQualityPopoverRender), so this
+    // is a real, reachable state, not a dead one.
     if ("skipped" in entry) {
         if (forcing) {
             return (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                    {forcingText()}
+                    ⚡ translating…
                 </div>
             );
         }
@@ -4262,7 +4155,7 @@ function translationLines(message: Message) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
                 ⚠ translation failed
-                {forcing && ` · ${forcingText()}`}
+                {forcing && " · ⚡ translating…"}
                 {!forcing && hint && (
                     <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
                 )}
@@ -4301,7 +4194,7 @@ function translationLines(message: Message) {
                     : UPGRADE_COPY.googleBusy}
             >
                 {llmComing ? "⏳ translating…" : "⏳ waiting for the translator…"}
-                {forcing && ` · ${forcingText()}`}
+                {forcing && " · ⚡ translating…"}
                 {!forcing && hint && (
                     <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
                 )}
@@ -4315,7 +4208,7 @@ function translationLines(message: Message) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }} data-subline-same="">
                 {UPGRADE_COPY.nothingToTranslate}
-                {forcing && ` · ${forcingText()}`}
+                {forcing && " · ⚡ translating…"}
             </div>
         );
     }
@@ -4344,11 +4237,10 @@ function translationLines(message: Message) {
     // above rates this Google line unreliable, never to make ≈ look worse
     // than it is. A paid install keeps the "?" it always had.
     const rough = unsure && isAutomaticOnly();
-    // An Automatic owner can ask what ✦ reads ANY ≈ line as, five times a
-    // day: "Preview ✦ (n left)" ends every ≈ line. While the press is out
-    // the same slot says "✦ translating…". Once the preview is back this
-    // branch is not reached (previewLine replaces the line above).
-    const offerPreview = isAutomaticOnly() && showsRoughLine(message) && (forcing || !previewTaken(message));
+    // The line itself offers nothing to press: an Automatic owner asks for a
+    // ✦ preview with ⚡ in the hover toolbar (forceQualityPopoverRender). A
+    // control on every ≈ line was noise: a channel of foreign messages showed
+    // one per message.
     // No label at all for "und", "zxx" or anything that names no language.
     const label = languageLabel(entry.lang);
     const langName = label === null ? null : languageName(label);
@@ -4391,7 +4283,6 @@ function translationLines(message: Message) {
               * the source script takes its own direction.
               */}
             <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{cleanTranslation(entry.text.trim(), message.content ?? "")}</span>
-            {offerPreview && previewControl(message, forcing)}
             {/*
               * ALONGSIDE the line above, never instead of it — a forced click
               * on a message that already carries a Google ≈ line (the common
@@ -4403,8 +4294,8 @@ function translationLines(message: Message) {
               * down — the ≈ line above is exactly what must never be taken
               * away in exchange for a failure the reader cannot act on.
               */}
-            {forcing && !offerPreview && (
-                <span style={{ color: "var(--text-muted)" }}> · {forcingText()}</span>
+            {forcing && (
+                <span style={{ color: "var(--text-muted)" }}> · ⚡ translating…</span>
             )}
             {!forcing && hint && (
                 <span style={{ color: "var(--text-muted)" }} title={forcedHintDisplay(hint).title}>
@@ -4434,60 +4325,18 @@ const CHANNEL_ICON_OFF = { fontSize: "1rem", opacity: 0.4, filter: "grayscale(1)
 const CHANNEL_TOGGLE_FAILED = "Couldn't save that. Try again.";
 
 /**
- * Does this message show a ≈ line right now, the line that ends in
- * "Preview ✦"? The ONE test previewControl and ⚡ both use, so a message
- * offers one of the two, never both: a ≈ line arriving takes ⚡ away on the
- * toolbar's next draw, and a line that goes (an edit, a failure) brings it back.
- */
-function showsRoughLine(message: Message): boolean {
-    if (!channelActive(message.channel_id)) return false;
-    const e = getTranslation(makeKey(message.id, settings.store.targetLang));
-    return isRealTranslation(e) && e.via === "google" && e.same !== true;
-}
-
-/**
- * ⚡ for an Automatic owner, on a message with no ≈ line: Google skipped it
- * (often a misdetection), it is ⏳ waiting, ⚠ failed, or not translated yet.
- * The same preview as "Preview ✦" (previewPress): the same five a day, the
- * same double-press guard, and at 0 the same Add AI (or payment pending).
- */
-function previewPopoverItem(message: Message, channel: NonNullable<ReturnType<typeof ChannelStore.getChannel>>) {
-    if (showsRoughLine(message)) return null;
-    const e = getTranslation(makeKey(message.id, settings.store.targetLang));
-    // ✦ has spoken (a ✦ line, or ✦ said it needs none): nothing to preview.
-    if (isRealTranslation(e) && e.via !== "google") return null;
-    if (e !== undefined && "skipped" in e && e.via !== undefined && ENGINE_RANK[e.via] >= 1) return null;
-    // Asked already for this text (or out right now): its line says so.
-    if (previewTaken(message)) return null;
-    // A new UTC day is a new five, so yesterday's "used up" never outlives
-    // midnight on the button.
-    if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
-    const label = previewsGone()
-        ? (isPaymentPending() ? UPGRADE_COPY.paymentPending : UPGRADE_COPY.popoverUpgrade)
-        : UPGRADE_COPY.popoverPreview.replace("{n}", String(tasteRemaining()));
-    return {
-        label,
-        icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
-        message,
-        channel,
-        // previewPress opens Add AI itself when none are left.
-        onClick: () => { void previewPress(message); }
-    };
-}
-
-/**
  * The ⚡ popover action: "spend one of the LLM's requests on THIS message,
  * right now." Distinct from the 🌐 channel toggle above (which is a per-CHANNEL
  * setting, no request involved) both in glyph — so the two are never confused
  * in the hover toolbar — and in what it does: a one-shot, per-MESSAGE spend.
  *
- * Hidden whenever no LLM is actually usable right now (`engine: "google"`, no
- * key entered, pinned to Google by an earlier auth failure, or an Automatic
- * install with no AI — see `effectiveEngine()`): there is no quality tier to
- * force a message into at all. An Automatic owner gets ⚡ as a ✦ preview
- * only on a message with no ≈ line (previewPopoverItem); a ≈ line carries
- * "Preview ✦" instead (previewControl). On an AI install ⚡ shows on every
- * message, even one ✦ already translated or skipped: a press asks again.
+ * Hidden whenever it could not do anything useful:
+ *  - no LLM is actually usable right now (`engine: "google"`, no key entered,
+ *    or pinned to Google by an earlier auth failure — see `effectiveEngine()`)
+ *    means there is no quality tier to force a message into at all;
+ *  - the message already carries an LLM verdict (`hasQualityVerdict()`) — a
+ *    real ✦ translation or an authoritative LLM skip — so another request
+ *    could not improve on what is already there.
  *
  * Still shown for a message stuck on a `≈` Google line, however that
  * happened: scroll-back demoted it, the earlier automatic attempt failed and
@@ -4501,10 +4350,57 @@ function forceQualityPopoverRender(message: Message) {
     // Nothing paid for: nothing to press.
     if (!activated()) return null;
     const engine = effectiveEngine();
-    // An Automatic owner (Google alone): ⚡ is a ✦ preview, but ONLY on a
-    // message that shows no ≈ line. A ≈ line carries "Preview ✦" itself
-    // (previewControl), and the two are never offered for one message.
-    if (!isLlmEngine(engine)) return isAutomaticOnly() ? previewPopoverItem(message, channel) : null;
+    // An Automatic owner gets the button too: a ✦ PREVIEW, one of the day's
+    // five, on any message (with or without a ≈ line).
+    const preview = !isLlmEngine(engine) && isAutomaticOnly();
+    if (!isLlmEngine(engine) && !preview) return null;
+
+    const key = makeKey(message.id, settings.store.targetLang);
+
+    if (preview) {
+        // An Automatic owner's preview: nothing to ask once ✦ has spoken.
+        // An AI subscriber keeps ⚡ on every message (below), even one ✦
+        // translated or skipped: pressing it asks again, forced.
+        if (hasQualityVerdict(key)) return null;
+        // A new UTC day is a new five, so yesterday's "used up" never
+        // outlives midnight on the button.
+        if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
+        if (tasteExhausted()) {
+            // Today's five are used, so a press would send nothing. Offer the
+            // one thing that does help: the Add AI panel. While a payment is
+            // on its way, say that instead (P4); a press says what happens next.
+            if (isPaymentPending()) {
+                return {
+                    label: UPGRADE_COPY.paymentPending,
+                    icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+                    message,
+                    channel,
+                    onClick: () => openUpgrade()
+                };
+            }
+            return {
+                label: UPGRADE_COPY.popoverUpgrade,
+                icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+                message,
+                channel,
+                onClick: () => openUpgrade()
+            };
+        }
+        // Nothing to offer once one has been asked for this text of the
+        // message: asking again would spend another of the five for the same
+        // answer. An edit is new text, so it is offered again.
+        if (previewTaken(message)) return null;
+        return {
+            label: UPGRADE_COPY.popoverPreview.replace("{n}", String(tasteRemaining())),
+            icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
+            message,
+            channel,
+            onClick: () => {
+                void forceQualityTranslate(message);
+            }
+        };
+    }
+    if (!isLlmEngine(engine)) return null;
 
     const { label } = LLM_ENGINES[engine];
 
@@ -4934,30 +4830,6 @@ function channelIdTextAllowed(channelId: unknown): boolean {
 }
 
 /**
- * BIOS AND CUSTOM STATUSES: may one shown right now be translated? They carry
- * no channel of their own, so the rule is where the reader IS:
- *   - a server channel is open (the member list, a profile opened from it):
- *     THE SAME RULE AS THE MESSAGES THERE (All servers and the per-channel
- *     switch, channelActive), so "All servers" off, or this channel off,
- *     also stops its bios and statuses;
- *   - a server is open with no text channel (its home or members page):
- *     the server-wide rule, "All servers";
- *   - anywhere else (Home and the DM list, a DM or group DM, Friends):
- *     allowed, as before. The owner's call: bios and statuses in the DM list
- *     keep translating even with DMs off. Messages there are not affected.
- * Callers are inside try/catch: a throw means Discord's own text (silence).
- */
-function userTextAllowed(): boolean {
-    const channelId = SelectedChannelStore.getChannelId();
-    const channel = typeof channelId === "string" && channelId !== "" ? ChannelStore.getChannel(channelId) : undefined;
-    if (isGuildChannel(channel)) return channelActive(channelId as string);
-    if (channel) return true;
-    const guildId = SelectedGuildStore.getGuildId();
-    if (typeof guildId === "string" && guildId !== "") return settings.store.globalAuto === true;
-    return true;
-}
-
-/**
  * What each wrapped Discord parser translates, and whether it has room for a
  * line. `parseTopic` also renders a voice channel's description, so the label
  * is the neutral "Description", not "Topic". `guildOnly: false` is for
@@ -5281,16 +5153,13 @@ export default definePlugin({
     // would have had there: null where the patch appends a child, and the
     // original child where it wraps one.
     // Every profile bio (the About Me section, the full profile, the DM side
-    // profile, the minimal popout), where userTextAllowed lets it (in a
-    // server: the messages' rule there): Discord's own bio renderer element,
+    // profile, the minimal popout): Discord's own bio renderer element,
     // translated IN PLACE with a toggle at its end. Discord's element
     // unchanged for anyone not paid, for an empty bio, for the reader's own
     // bio, or on any throw.
     bioInPlace: (original: unknown, userBio: unknown, userId?: unknown) => {
         try {
             if (!isPaidSurfaceUser() || original == null || typeof userBio !== "string" || userBio.trim() === "") return original;
-            // In a server, the messages' rule there (userTextAllowed).
-            if (!userTextAllowed()) return original;
             const uid = userId ?? (original as any)?.props?.userId;
             if (isCurrentUser(uid)) return original;
             return <BioInPlace element={original} bio={userBio} userId={uid} />;
@@ -5310,13 +5179,15 @@ export default definePlugin({
     // channel being viewed (the forum, or a post in it).
     forumTagChildren: (name: unknown) =>
         tightChildren(name, name, ChannelStore.getChannel(SelectedChannelStore.getChannelId() ?? "")),
-    // Member list and DM list: the custom status text. In a server it follows
-    // the messages' rule there; in the DM list it translates as before
-    // (userTextAllowed).
+    // Member list and DM list: the custom status text (user-level, allowed
+    // wherever it is shown).
     statusTextChildren: (original: unknown, text: unknown) => {
         try {
             if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return original;
-            if (!userTextAllowed()) return original;
+            if (decodeMessage(text) !== null) {
+                const lead = typeof original === "string" ? /^\s*/.exec(original)![0] : "";
+                return <>{lead}<DecodedStatus key="subline-surface" text={text} /></>;
+            }
             return <TightSwap key="subline-surface" original={original} text={text} />;
         } catch {
             return original;
@@ -5337,7 +5208,8 @@ export default definePlugin({
     statusBubbleText: (text: unknown, props: any) => {
         try {
             if (!isPaidSurfaceUser() || props?.sublineSelf === true || typeof text !== "string" || text.trim() === "") return text;
-            if (!userTextAllowed()) return text;
+            // A status in a code: decoded here, then translated if foreign.
+            if (decodeMessage(text) !== null) return <DecodedStatus text={text} />;
             return <StatusBubbleText text={text} userId={props?.sublineUser} />;
         } catch {
             return text;
@@ -5736,8 +5608,6 @@ export default definePlugin({
         // Read back from the ledger on the next start() (loadPreviewLedger).
         previews.clear();
         previewPending.clear();
-        previewLeftShown = null;
-        previewRedrawQueued = false;
         __resetWeeklyStats();
         // clearStore() has existed and worked the whole time, and the plugin
         // never called it — only the test harness did, which is why the tests

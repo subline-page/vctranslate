@@ -133,6 +133,21 @@ export function cleanText(s: string): string {
     return s.replace(CONTROL_RE, " ");
 }
 
+/**
+ * Discord's codes out of a reported message: no user, role, channel or emoji
+ * id reaches the report. A user mention becomes "@user", a role "@role", a
+ * channel "#channel", a custom emoji its ":name:", a timestamp "<time>".
+ */
+export function withoutIds(s: string): string {
+    return s
+        .replace(/<@!?\d{1,25}>/g, "@user")
+        .replace(/<@&\d{1,25}>/g, "@role")
+        .replace(/<#\d{1,25}>/g, "#channel")
+        .replace(/<a?:(\w{1,32}):\d{1,25}>/g, ":$1:")
+        .replace(/<t:-?\d{1,15}(?::[tTdDfFR])?>/g, "<time>")
+        .replace(/<\/([\w -]{1,64}):\d{1,25}>/g, "/$1");
+}
+
 /** A light check: one @, a dot in the domain, no spaces. */
 export function looksLikeEmail(s: string): boolean {
     return s.length <= MAX_EMAIL_CHARS && EMAIL_RE.test(s);
@@ -155,8 +170,8 @@ export function reportFor(
 ): TranslationReport | null {
     if (!stored || typeof stored.text !== "string" || stored.same === true) return null;
     if (typeof messageContent !== "string") return null;
-    const original = cleanText(messageContent).slice(0, MAX_REPORT_TEXT_CHARS);
-    const translation = cleanText(stored.text).slice(0, MAX_REPORT_TEXT_CHARS);
+    const original = withoutIds(cleanText(messageContent)).slice(0, MAX_REPORT_TEXT_CHARS);
+    const translation = withoutIds(cleanText(stored.text)).slice(0, MAX_REPORT_TEXT_CHARS);
     if (original.trim() === "" || translation.trim() === "") return null;
     return {
         original,

@@ -1,7 +1,7 @@
 /**
  * Every user-facing string for activating and upgrading Subline from inside
  * Discord: the activation notice, the Activate and Add AI panels, the code
- * entry, their toasts, and the ✦ preview control. One place, so the copy can be
+ * entry, their toasts, and the ⚡ popover labels. One place, so the copy can be
  * rewritten without reading any code. Short plain sentences, no em dashes.
  */
 /** AI prices in cents, as on the Dodo products. The yearly saving below is derived from them. */
@@ -83,7 +83,7 @@ export const UPGRADE_COPY = {
     /** Buy or Add AI while a payment from this install is still being confirmed. */
     purchasePending: "Your payment is still being confirmed. It switches on by itself.",
     /**
-     * In place of "Add AI" (and "Activate") on the plan card, the ✦ preview control,
+     * In place of "Add AI" (and "Activate") on the plan card, the ⚡ popover,
      * the ✦ preview line and as the panel title, while a payment is on its way
      * (P4): a checkout was opened, or the relay said purchase_pending.
      */
@@ -103,29 +103,15 @@ export const UPGRADE_COPY = {
 
     /* ---- ✦ previews (Automatic) ---- */
     /**
-     * The control at the end of every ≈ line on an Automatic install. {n} is
-     * how many previews are left today, the same number on every line. At 0
-     * it still reads this way (with 0), and a press opens Add AI.
-     */
-    previewAsk: "Preview ✦ ({n} left)",
-    /** Its hover text and screen-reader name while previews are left. */
-    previewAskTitle: "Translate this message with ✦ AI. {n} left today.",
-    /** Its hover text and screen-reader name once today's previews are used. */
-    previewNoneTitle: "No previews left today. Add AI for ✦ on every message.",
-    /** Shown in the control's place while its preview is out. */
-    previewBusy: "✦ translating…",
-    /**
      * The end of the hover text on a "≈ rough" line written in Latin letters
      * (Automatic only: no ✦ line comes by itself on that plan).
      */
-    roughPreviewHint: "Preview ✦ checks it with AI.",
-    /** Its hover text and screen-reader name while the preview is out. */
-    previewBusyTitle: "Translating this message with ✦ AI.",
-    /** ⚡ for an Automatic owner, only on a message with no ≈ line. {n} is how many are left today. */
+    roughPreviewHint: "Press ⚡ to check it with ✦ AI.",
+    /** The ⚡ popover for an Automatic owner. {n} is how many are left today. */
     popoverPreview: "Preview ✦ ({n} left today)",
-    /** That ⚡ once today's previews are used. */
+    /** The ⚡ popover once today's previews are used. */
     popoverUpgrade: "Add AI ✦",
-    // A ⚡ or Preview ✦ press on a message ✦ says is already in the reader's language: no
+    // A ⚡ press on a message ✦ says is already in the reader's language: no
     // duplicate line, just this.
     nothingToTranslate: "✦ nothing to translate here",
     /** The link after a ✦ preview. */
