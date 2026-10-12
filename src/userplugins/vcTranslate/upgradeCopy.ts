@@ -1,0 +1,150 @@
+/**
+ * Every user-facing string for activating and upgrading Subline from inside
+ * Discord: the activation notice, the Activate and Add AI panels, the code
+ * entry, their toasts, and the ✦ preview control. One place, so the copy can be
+ * rewritten without reading any code. Short plain sentences, no em dashes.
+ */
+/** AI prices in cents, as on the Dodo products. The yearly saving below is derived from them. */
+export const AI_MONTHLY_CENTS = 199;
+export const AI_ANNUAL_CENTS = 1999;
+
+/**
+ * What a year saves against 12 months, in whole percent, rounded DOWN so the
+ * claim is never bigger than the real saving ($23.88 vs $19.99 is 16.3%).
+ */
+export function annualSavingPercent(monthlyCents: number, annualCents: number): number {
+    return Math.floor((12 * monthlyCents - annualCents) * 100 / (12 * monthlyCents));
+}
+
+const ANNUAL_NOTE = `Save ${annualSavingPercent(AI_MONTHLY_CENTS, AI_ANNUAL_CENTS)}%`;
+
+export const UPGRADE_COPY = {
+    /* ---- not activated ---- */
+    /** A notice that stays until dismissed, shown once per session while not activated. */
+    activateNotice: "Subline isn't activated on this computer yet.",
+    activateButton: "Activate",
+    activateTitle: "Activate Subline",
+    activateSubtitle: "Pay once and every message gets translated.",
+    automaticName: "Automatic",
+    automaticPrice: "$4.99 once",
+    automaticNote: "≈ under every message, profile and embed. Yours for good.",
+    automaticButton: "Buy for $4.99",
+    enterCodeButton: "Enter a code",
+
+    /* ---- entering a code (promo codes and license keys) ---- */
+    codeTitle: "Enter a code",
+    codeSubtitle: "A server code, or the code from your purchase email.",
+    codePlaceholder: "Your code",
+    codeSubmit: "Activate",
+    codeEmpty: "Type or paste a code first.",
+    codeClaimed: "This code has been fully claimed.",
+    codeNotFound: "That code doesn't exist.",
+    codeAlready: "Already yours.",
+    codeUnreachable: "Can't reach Subline right now. Try again in a minute.",
+    codeRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",
+    /** A promo code allows only a few claims from one network. */
+    codeNetLimited: "This code has reached its limit on your network.",
+    deviceLimit: "This code is on 3 computers already. It frees up after 30 days unused, or email support@subline.page for a reset.",
+    /** The button next to the device-limit sentence: copies SUPPORT_EMAIL (Vencord opens no mailto: links). */
+    deviceLimitButton: "Copy email",
+    /** The toast after deviceLimitButton copied the address. */
+    emailCopied: "Email copied.",
+    /** A typed license key or Subline code checked OK, before it is linked to this computer. */
+    codeConfirmTitle: "Use this code?",
+    codeConfirm: "It works on up to 3 computers.",
+    codeConfirmButton: "Use it",
+
+    /* ---- a saved code the relay could not check yet ---- */
+    /** A notice while a saved code is unconfirmed because the relay can't be reached. No Activate button. */
+    checkingNotice: "Can't reach Subline to check your code. Retrying.",
+    checkingNoticeButton: "OK",
+
+    /* ---- an early user's first 0.2.0 start, before the relay has answered ---- */
+    /** Instead of the activation notice while the early-user check is still out (at most a day). */
+    earlyCheckingNotice: "Checking your early-user access. This can take a minute.",
+    earlyCheckingNoticeButton: "OK",
+
+    /* ---- Automatic owners: add AI ---- */
+    panelTitle: "Add AI",
+    panelSubtitle: "✦ reads the whole conversation, so slang and replies come out right.",
+    /**
+     * The only line under the AI plans in the Add AI panel (P3): a Dodo coupon
+     * goes on the checkout page, not in Subline. Coupons are made for the
+     * monthly plan only (relay createCoupon: restricted_to [monthly]), so the
+     * yearly page refuses them: the line says which button to press.
+     */
+    couponHint: "Coupon? Pick $1.99 a month, then enter it on the payment page.",
+    monthlyButton: "$1.99 a month",
+    annualButton: `$19.99 a year · ${ANNUAL_NOTE}`,
+    aiNeedsAutomatic: "AI needs Automatic first.",
+    alreadyAutomatic: "You already have Automatic.",
+    /** Monthly or Yearly on an install that already has AI (relay 409 already_owned). */
+    alreadyAi: "You already have AI.",
+    /** Buy or Add AI while a payment from this install is still being confirmed. */
+    purchasePending: "Your payment is still being confirmed. It switches on by itself.",
+    /**
+     * In place of "Add AI" (and "Activate") on the plan card, the ✦ preview control,
+     * the ✦ preview line and as the panel title, while a payment is on its way
+     * (P4): a checkout was opened, or the relay said purchase_pending.
+     */
+    paymentPending: "Payment being confirmed",
+    /** The relay answered that it cannot sell this right now (no product set up, or the shop is down). */
+    checkoutUnavailable: "Buying isn't available yet. Use a code, or try again later.",
+
+    /* ---- shared ---- */
+    /** Under the Activate panel only. */
+    panelFootnote: "Pay in your browser. Subline switches on here by itself.",
+    checkoutOpenedToast: "Finish checkout in your browser.",
+    /** A notice that stays until dismissed: the buyer is often still in the browser when it lands. */
+    purchasedNotice: "You're on. Every message translates by itself now.",
+    purchasedNoticeButton: "OK",
+    /** Instead of "You're on." when the relay grants Automatic to an early user. */
+    earlyNotice: "Thanks for being early. Automatic is yours, no payment needed.",
+
+    /* ---- ✦ previews (Automatic) ---- */
+    /**
+     * The control at the end of every ≈ line on an Automatic install. {n} is
+     * how many previews are left today, the same number on every line. At 0
+     * it still reads this way (with 0), and a press opens Add AI.
+     */
+    previewAsk: "Preview ✦ ({n} left)",
+    /** Its hover text and screen-reader name while previews are left. */
+    previewAskTitle: "Translate this message with ✦ AI. {n} left today.",
+    /** Its hover text and screen-reader name once today's previews are used. */
+    previewNoneTitle: "No previews left today. Add AI for ✦ on every message.",
+    /** Shown in the control's place while its preview is out. */
+    previewBusy: "✦ translating…",
+    /**
+     * The end of the hover text on a "≈ rough" line written in Latin letters
+     * (Automatic only: no ✦ line comes by itself on that plan).
+     */
+    roughPreviewHint: "Preview ✦ checks it with AI.",
+    /** Its hover text and screen-reader name while the preview is out. */
+    previewBusyTitle: "Translating this message with ✦ AI.",
+    /** ⚡ for an Automatic owner, only on a message with no ≈ line. {n} is how many are left today. */
+    popoverPreview: "Preview ✦ ({n} left today)",
+    /** That ⚡ once today's previews are used. */
+    popoverUpgrade: "Add AI ✦",
+    // A ⚡ or Preview ✦ press on a message ✦ says is already in the reader's language: no
+    // duplicate line, just this.
+    nothingToTranslate: "✦ nothing to translate here",
+    /** The link after a ✦ preview. */
+    previewLink: "Add AI",
+    /** Hover text on a ≈ line waiting for Google. */
+    googleBusy: "Google is busy. Subline retries by itself."
+} as const;
+
+/** Where the device-limit sentence sends the reader to ask for a reset. */
+export const SUPPORT_EMAIL = "support@subline.page";
+
+/**
+ * The small toggle at the end of a status or bio that is shown translated in
+ * place. Its glyph says what is showing: the translation's own glyph (✦, or ≈
+ * for Google's), or ↩ for the original. The label is its tooltip and its
+ * screen-reader name, and says what a click does.
+ */
+export const IN_PLACE_COPY = {
+    originalGlyph: "↩",
+    showOriginal: "Show the original",
+    showTranslation: "Show the translation"
+} as const;

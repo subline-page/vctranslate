@@ -1,0 +1,1173 @@
+# vcTranslate
+
+A [Vencord](https://vencord.dev) userplugin that automatically translates
+incoming Discord messages and renders the translation as a dimmed, italic
+subtitle beneath the original — like a live caption track for a channel in a
+language you don't speak.
+
+## Install
+
+Requires a from-source Vencord checkout — userplugins do not work with the
+stock installer.
+
+### Option A: symlink (recommended for development)
+
+This is how this repo itself is set up. Keeping the plugin in its own git
+repo and symlinking it into Vencord means edits are made in one place and
+picked up by Vencord's build immediately, with no copy step to forget.
+
+```bash
+# from the Vencord repo root
+mkdir -p src/userplugins
+ln -s /path/to/discord-translate/src/userplugins/vcTranslate src/userplugins/vcTranslate
+pnpm build
+```
+
+If you symlink, also copy (or write your own version of) this repo's root
+`tsconfig.json` `paths` block into the plugin's source tree, or keep it in the
+plugin repo as we do here. It exists **only** for the symlinked case: esbuild
+discovers a file's tsconfig by walking up from that file's *real*,
+symlink-resolved path, not the path it was reached through. Since the plugin's
+real location is a sibling directory (`discord-translate/`), not inside
+`Vencord/`, esbuild would otherwise never find Vencord's own tsconfig and
+would fail to resolve bare specifiers like `@api/*`, `@utils/*`,
+`@webpack/common`, etc. The `paths` block in [`../../../tsconfig.json`](../../../tsconfig.json)
+mirrors Vencord's own path map, relative to the sibling checkout, so esbuild's
+default per-file discovery resolves them anyway. Vencord's own internal files
+are unaffected — they still resolve through normal walk-up discovery via
+Vencord's own tsconfig.
+
+### Option B: copy (for a one-off install, no ongoing plugin development)
+
+```bash
+# from the Vencord repo root
+mkdir -p src/userplugins
+cp -r /path/to/discord-translate/src/userplugins/vcTranslate src/userplugins/
+pnpm build
+```
+
+Copy-install users are unaffected by the `paths` caveat above — a copied
+plugin's real path is already inside the Vencord tree, so Vencord's own
+tsconfig resolves it through ordinary walk-up discovery.
+
+### Injecting
+
+```bash
+pnpm inject
+```
+
+**Warning:** `pnpm inject` patches your actual Discord installation (desktop
+app or browser userscript, depending on what you select) to load your local
+Vencord build. This is a real modification to software you use every day —
+run it only once you've decided you want that, and know that `pnpm uninject`
+reverses it.
+
+After injecting, restart Discord and enable **VcTranslate** in
+Settings → Plugins.
+
+## Plans (paid only)
+
+There is no free tier and no trial. What an install owns comes from the
+relay's v2 `/v1/status` (sent with `x-subline-api: 2` and
+`x-subline-install`), is kept on disk (`entitlement.ts`), and counts offline
+only until the relay's `tokenExpiresAt` (7 days after its last good answer;
+the plugin asks at start and every 24 hours).
+
+- **Not activated**: nothing is translated, not even with Google, and no
+  surface is touched. One notice ("Activate") opens the Activate panel: buy
+  Automatic, or enter a code (a server's promo code is redeemed on
+  `/v1/redeem`; anything else is checked as a license key first).
+- **Automatic** ($4.99 once): ≈ Google on every message and surface (tight
+  surfaces show ≈ in place), local decoders, and five ✦ previews a day:
+  every ≈ line ends in "Preview ✦ (n left)", and a message with no ≈ line
+  (skipped, waiting, failed, not yet translated) offers it as ⚡ instead.
+- **AI** (monthly or annual, on top of Automatic): ✦ on everything, under the
+  saved code.
+
+The installer seeds its install id as the hidden `installId` setting, and the
+plugin prefers it (`taste.ts`). All copy lives in `upgradeCopy.ts` and
+`settingsCopy.ts`.
+
+## Use
+
+Once activated, no setup required: every server (guild) channel you read is
+translated, using Google (≈) — that's the
+`globalAuto` setting, on by default. DMs and group DMs are different: they're
+never swept in by `globalAuto`, so they stay untranslated until you opt a
+specific one in. Hover any message in a channel or DM → click the 🌐 button
+in the message's hover toolbar to turn on auto-translate for that
+conversation specifically. The choice persists across restarts (stored via
+Vencord's `DataStore`, keyed per channel id). Click it again (now showing 🌫)
+to turn a channel back off.
+
+If you'd rather manage translation per channel instead of having every
+server channel translated automatically, Settings → VcTranslate has an
+**"All servers"** (`globalAuto`) toggle —
+turn it off and use the 🌐 button to opt individual channels in, the same way
+DMs already work.
+
+**A second, per-message button — ⚡ "Translate with Gemini/Claude/Groq now" — forces
+one specific message through the quality tier.** It sits next to the 🌐
+toggle in the same hover toolbar, with a different glyph so the two are never
+confused: 🌐 is a per-*channel* setting that spends nothing by itself; ⚡ is a
+one-shot, per-*message* spend, and its label says so. It exists for the
+messages the automatic paths deliberately leave on `≈` — a message you scrolled
+back to (scroll-back is fast-tier only, see "Engines" below), or one whose
+one automatic quality attempt already failed and will not be retried
+automatically this session (see "at most one request per message, per
+session", also below). Clicking it asks the configured LLM for that one
+message by name, on the spot: it skips the scroll-back rule and the
+once-per-session ledger, because you naming a specific message outranks both.
+It does **not** skip the rate limit or an active cooldown — if the engine is
+currently rate limited, the click spends nothing and you get the same
+cooldown feedback as everyone else (see "Free-tier rate limiting" below),
+rather than a silent no-op that quietly burns a request you can't get back.
+The existing `≈` line stays on screen until the `✦` reply lands, exactly like
+an automatic upgrade.
+
+**While that request is out, the subtitle shows `⚡ translating…`** — either
+on its own, for a message that had no translation at all yet, or appended
+after the existing `≈` line, never in place of it. A second click while one
+is already out for that message does nothing (same once-in-flight guard as
+the automatic paths) — the ⚡ button's own label says so too, switching to
+*"already translating…"* instead of a token count for as long as the
+request is running.
+
+**If the request settles WITHOUT a real translation, a brief hint replaces
+`⚡ translating…` instead of it just vanishing** — a manual click spent a
+scarce request on your own say-so, so unlike an automatic quality attempt
+(which stays silent — see "Free-tier rate limiting" below) you get told
+whether it's worth waiting or something's actually wrong:
+- **cooling down** or **rate limited** (the request never went out at all —
+  the engine was parked after a 429, or the rate gate dropped it while it was
+  still queued) — wait a moment and try again;
+- **translation failed** (it went out and the engine rejected or failed it)
+  — hovering shows a short reason (rate limited / rejected key / engine
+  error).
+
+Either way the hint clears itself after a few seconds on its own, is never
+written to the translation store, and never takes an existing `≈` line away
+— same rule as `⚡ translating…` itself.
+
+Only shown when it could actually do something: engine = Google has no
+quality tier to force a message into at all, and a message that already
+carries an LLM verdict (a `✦` translation, or a skip the LLM itself
+confirmed) has nothing left for another request to improve on. Its label
+also says how much budget is actually available right now — see the quota
+indicator below, which shows the exact same number.
+
+**A `✦ N` (or `✦ 0:45`) indicator sits in the chat bar itself**, next to the
+message box, so you don't have to guess before spending a scarce request. It
+answers exactly one question: *if you click ⚡ right now, will it actually
+send anything?*
+
+- **`✦ 3`** — three more quality-tier requests would go through this instant.
+  **What that number describes depends on the engine, and the tooltip says
+  which.** For Claude and Gemini it is the plugin's own budget — the tokens
+  sitting in `rateGate.ts`'s token bucket, deliberately tuned to well under
+  the provider's real ceiling (see "Free-tier rate limiting" below) — because
+  those providers tell us nothing about their side and guessing would be
+  dishonest. For **Groq**, which reports `x-ratelimit-remaining-requests` on
+  every response including successful ones, the indicator shows the **smaller
+  of the two real limits**, and says in the tooltip when the provider's own
+  figure is the one doing the work. That fixes a real defect: the indicator
+  used to be able to read `✦ 3` while the provider refused the very next
+  request instantly, because it was only ever showing our side of the
+  arithmetic. A provider reading is discarded once its stated reset window
+  rolls over, or after a minute if none was stated, rather than being shown
+  stale.
+- **`✦ 0:45`** — the engine is cooling down after a 429 (see "When the LLM
+  engine is rate limited" below); ⚡ will not send anything for another 45
+  seconds, however many tokens happen to be sitting in the gate. Cooldown
+  always takes priority over a token count in what's shown, because a token
+  count alone would say "ready" when clicking would do nothing.
+- **Nothing at all** — engine = Google, an LLM is selected but its API key
+  field is empty, or the key was rejected earlier this session (pinned to
+  Google until restart). There is no quality-tier budget to report in any of
+  these cases, and a permanently-zero indicator would be noise rather than
+  information.
+
+Hovering it spells out in words what the glyph and number mean — including
+whether the number is the plugin's own budget or the provider's own reported
+quota — exactly like the subtitle's own `title` tooltips. It updates roughly
+once a second while mounted, purely by polling — neither the rate gate nor the
+cooldown store pushes updates, and the read behind it (`rateGateAvailable()`)
+is a pure read that never spends a token or otherwise changes what the gate
+will do next, so watching the indicator cannot itself affect your budget.
+
+**Only the channel you are looking at is translated as messages arrive.**
+`globalAuto` decides which channels are *eligible*; the channel currently on
+screen is the one that actually gets spent on. A message that arrives in
+another channel is not translated then and there — it is translated when you
+open that channel, by the same catch-up pass described below. This is
+deliberate: free-tier API budgets are on the order of tens of requests a day,
+and translating channels nobody has read is the fastest way to spend all of
+them before lunch. (Popped-out channels and second Discord windows are not
+detected — a message read in a popout is translated when its channel is next
+opened in the main window, not never.)
+
+Opening (or reopening) an enabled channel also translates a backlog of its
+most recent messages — how many is controlled by the **"How many recent
+messages to translate when opening an enabled channel"** slider (default 20,
+0 disables catch-up). Messages the engine reports as *already* in your target
+language get no subtitle, and are remembered as resolved: reopening the
+channel does not re-send them. Editing a message clears its subtitle and
+re-translates the new text.
+
+Two other things happen before a request is ever sent, both to protect that
+daily budget:
+
+- **Obviously-English messages are never sent** when your target language is
+  English. This is a local check (`detectLang.ts`) and it is deliberately
+  timid: anything short or ambiguous (`yess`, `THIS`, `ok`) is sent anyway,
+  because guessing wrong would silently lose a translation with no error and
+  no way for you to know. It is implemented **only** for English targets; every
+  other target language skips the check entirely.
+- **Chat shorthand, and elongated versions of it, are never sent.** A whole
+  message that is nothing but shorthand/interjections (`gg`, `brb`, `hbu`,
+  and about 80 more) is skipped without a request (`skip.ts`), and so is an
+  *elongated* one — `yesssss`, `waiiiiiit`, `helloooooo`, `lmaoooooo`,
+  `goooooood morninggggg`, `shhhh` all skip. Any run of **three or more**
+  identical letters is collapsed before the shorthand check runs — but to
+  exactly ONE letter *and* to exactly TWO, both tried, because one rule
+  cannot serve every word: `yesssss` only reconstructs as `yes` (its base word
+  has a single `s`) while `goooooood` only reconstructs as `good` (its base
+  word has a genuine doubled `o` — collapsing to one gives `god` instead). A
+  run of exactly two is left alone by both forms — `hello`'s own doubled `l`
+  never collapses, only the elongated `o` does — because English essentially
+  never triples a letter in ordinary spelling, so 3+ is a safe threshold.
+  The same two-forms collapsing also feeds the English-sentence check just
+  above, so an elongated word buried inside a longer sentence (`"sooooo good
+  to see you"`) still counts as evidence either way. It cannot manufacture a
+  false match on its own — a foreign word like Romanian `ceeeee` collapses to
+  `ce`/`cee`, neither of which is in any list, so it still gets translated —
+  only deliberately adding a *collapsed* word to `CHAT_SHORTHAND` or
+  `ENGLISH_WORDS` can do that, which is why those additions stay short and
+  deliberate rather than automatic.
+- **Translations are remembered across restarts.** Restarting Discord used to
+  re-translate the whole visible backlog from scratch; now it costs nothing.
+  See Privacy below for what that means for other people's messages.
+
+Every message is translated **twice, by design.** A subtitle marked `≈`
+appears within about a second — Google, translating that one message in
+isolation, no conversation context. If an LLM engine (Claude, Gemini or Groq) is
+configured, that same message is *also* sent to it with a rolling window of
+recent channel context, and when that answer comes back — typically some
+seconds later, up to about 20 — it silently replaces the `≈` line in place
+with a `✦` one. You never do anything to trigger this; it just gets better
+under you.
+
+| Prefix | Meaning |
+|---|---|
+| `✦ es · …` | Translated by a context-aware LLM engine (Claude, Gemini or Groq) — batched, with a rolling window of recent channel messages. This is the final answer for this message |
+| `≈ es · …` | Translated by Google alone, each message in isolation, no conversation context. If an LLM is configured, this is a **placeholder that has not been upgraded yet** — wait a few seconds. If Google is the only engine configured, this is the final answer |
+| `≈ ha? · …` | The `?` means Google was **not confident** which language this was. Treat the line as unreliable — see below |
+
+Hovering the marker shows the engine's full name and the language spelled out
+("Translated by Google Translate · Hausa"), because a bare `ha` tells you
+nothing about whether the detection was plausible.
+
+### The `?` marker, and why short replies are the dangerous ones
+
+Google reports how confident it is in the language it detected, and on very
+short messages it is often barely confident at all. Measured against the live
+endpoint:
+
+| Message | Detected | Confidence | Rendered | Actually means |
+|---|---|---|---|---|
+| `ne` | `ha` (Hausa) | 0.22 | "it is" | German **"no"** — the opposite |
+| `ja` | `et` | 0.45 | "and" | German **"yes"** |
+| `nö` | `et` | 0.61 | "so-called" | German **"nope"** |
+| `ok dann brauch ich net neidisch sein` | `de` | 0.99 | correct | — |
+| `hola que tal` | `es` | 1.00 | correct | — |
+
+Two things make this worse than an ordinary bad translation: the wrong answer
+reads just as fluently as a right one, and the failures cluster on yes/no
+replies, where being wrong **inverts** the meaning of the message.
+
+So two defences, both Google-only:
+
+- **Short replies borrow their parent's language.** If a message is a reply, is
+  short, and the message it replies to was detected confidently, that language
+  is pinned instead of auto-detected. Live, `ne` pinned to German returns "no"
+  rather than "it is". Long messages are excluded on purpose — they detect
+  reliably on their own, and forcing a long Spanish reply into its German
+  parent's language would create the very bug this prevents.
+- **Anything still under 0.85 confidence is marked `?`.** It is shown rather
+  than hidden — a rough translation you know to distrust beats a blank — with
+  the confidence spelled out on hover.
+
+Neither applies to the LLM engines: they receive the surrounding conversation,
+which resolves `ne` far better than any language code could. This is one of
+the concrete reasons the quality tier's upgrade is worth waiting the extra
+~20 seconds for, and one of the things you lose for as long as only the fast
+(Google) tier is answering.
+
+With Claude or Gemini configured, the marker doubles as a live readout of
+whether the second, better translation has landed yet: `✦` means the LLM
+engine answered for that specific message, `≈` means it has not — either
+because it simply has not had its turn yet (the normal case for the first
+~20 seconds of any message's life), or because it could not: the key field
+is empty, the key was rejected, or the engine is rate limited right now.
+**A `≈` line that never turns into `✦`, minutes later, in an otherwise
+active channel is the sign something is actually wrong** (usually a quota
+issue) — a `≈` line that is merely a few seconds old is not.
+
+The **Reading language** setting is a dropdown of language names (the same
+list the installer's language screen offers, see `languages.ts`). It defaults
+to your Discord client's own language (`en-US` becomes `en`, `pt-BR` becomes
+`pt`, and so on) rather than always English. Changing it takes effect at once:
+the batchers are rebuilt for the new language, translations cached in the old
+one are dropped, and the channel on screen is translated again. An old
+free-text value from an earlier build (`pt-BR`, `English`) is turned into its
+code at start.
+
+### Codes and fancy text, decoded locally
+
+A message written entirely in Morse, 8-bit binary, grade 1 Braille, Base64,
+ROT13 or spaced letter emoji (🇭 🇪 🇾) gets a line under it such as
+`decoded · morse · HAPPY BIRTHDAY` (no ≈: nothing translated it). This runs on your computer with no network, on
+every plan. If the decoded text is in another language, the decoded text (not
+the code) goes through the normal translators and its translation appears
+under the decoded line. The rules are strict on purpose: "...", "ok.", links,
+code blocks, hashes, tokens and country flags (🇯🇵) never decode. Morse is
+claimed when every decoded word is a common English word (`wordList.ts`, from
+SCOWL, permissive license, about 14,000 words) or chat shorthand (LOL, LMAO),
+or when it has five or more letters that read as words. See
+`decode.ts`; the labels are in `DECODER_LABELS`.
+
+Morse and binary are also found INSIDE a message ("tell him .... .. / .-- --- .-. .-.. -..",
+or a code followed by a mention or emoji). Each run is judged by the same
+rules and must have at least three codes, so a dash or an ellipsis in a
+sentence is never a run. The decoded line shows only the decoded run(s). The
+decoded line shows even when the message is already in your language (it is
+then not translated). A reply bar quoting such a message shows it decoded in
+place, the original on hover, on every plan.
+
+A line whose language the engine could not name ("und", "zxx", or any code
+that is not a language) shows no language label (`langLabel.ts`).
+
+Fancy fonts (𝓱𝓸𝓵𝓪, ｈｏｌａ, ⓗⓞⓛⓐ, ʜᴏʟᴀ), upside-down text and Zalgo marks are
+turned back into plain letters before language detection and translation, so
+they translate like any other message. Letterlike capitals (ℌ ℜ ℂ ℝ) count as
+a font only beside other styled letters, so "x in ℝ" stays. Zalgo is cleaned
+per letter (3 or more stacked marks); real accents and other scripts' vowel
+signs are never touched. Code, links and Discord markup are left
+exactly as written, and usernames are never touched. See `normalize.ts`.
+
+## Engines
+
+**Two tiers, not one selected engine.** *Every* incoming message is sent to
+Google, always, regardless of what you have configured — this is the **fast
+tier**: a 700ms debounce, up to 10 messages per request, no conversation
+context, and it is what puts a `≈` subtitle on screen in about a second.
+If you have configured an LLM engine (Claude, Gemini or Groq), that *same* message
+is independently sent to it too — the **quality tier**: a 20-second debounce,
+up to 25 messages per request, with a rolling window of recent channel
+context. When the LLM answers, its result silently replaces the Google line
+in place and the marker flips from `≈` to `✦`. Neither tier waits on the
+other, and writes are upgrade-only: an LLM result may replace a Google line,
+but a slow Google reply can never overwrite an LLM line that already landed,
+and a failure marker can never overwrite a real translation from either
+tier. So a slow or failed tier never degrades what the other already
+produced — the worst it can do is leave the message where it already was.
+
+**The quality tier spends at most one request per message, per session.**
+A quality-tier failure writes nothing at all — that is what keeps your `≈`
+line readable instead of turning it into an error — which means the cache
+looks identical whether the LLM was asked and failed or was never asked. So
+the attempt is remembered separately, in memory. Without that, every channel
+open would re-offer the same message to the LLM forever, spending exactly the
+quota this two-tier split exists to conserve. (This bounds *re-asking* about
+one message. What bounds how many *new* messages can be asked about is the
+next paragraph — the two problems are separate, and the ledger never solved
+the second one.) The cost
+is an occasional missed `✦` where the failure was transient; the `≈` line is
+still there, and the reader sees nothing wrong. Editing the message,
+restarting Discord, or toggling the plugin off and on each buy a fresh
+attempt.
+
+**The quality tier covers the live conversation and channel opens — not
+history you are scrolling past.** Every message you receive while looking at a
+channel, and the backlog catch-up runs when you open one (including the
+history that arrives a moment later for a channel you had not visited this
+session), goes to both tiers. Messages that arrive because you kept
+*scrolling up* go to the fast tier only: you still get a `≈` Google subtitle
+within a second, they simply never flip to `✦`. That is where the LLM's
+conversation context is worth spending a request and where it is not — and
+scrolling is the one source with no natural bound on it. Discord re-fires
+`LOAD_MESSAGES_SUCCESS` for every chunk of history a scroll loads, and each
+one is a fresh screenful of never-before-seen messages, so a few hundred
+messages of scroll-back would spend the whole per-minute quota (see
+"Free-tier rate limiting") in seconds — which is exactly what produced a
+rate-limit toast moments after starting Discord. Re-opening the channel
+later spends its catch-up budget newest-message-first, so a deep stretch you
+scrolled past is not what it reaches — the `≈` lines on it stand.
+
+**Setting the engine to Google disables the quality tier entirely.** There is
+then only the fast tier, and `≈` is simply the final answer, exactly as if
+the second tier did not exist.
+
+| Engine | Cost | Quality |
+|---|---|---|
+| Google (fast tier, always on) | Free, no API key | Weaker on slang, mixed languages, and short fragments; each message is translated in isolation, with no conversation context |
+| Claude Haiku (`claude-haiku-4-5`), Gemini (`gemini-2.5-flash` by default, configurable) or Groq (`llama-3.3-70b-versatile` by default, configurable) (quality tier, when configured) | Roughly $2-3/month at typical chat volume for Claude; Gemini and Groq both have usable free tiers, and Groq's is by far the largest (see below) | Noticeably better on slang and code-mixed text; batches multiple messages per request and includes a rolling window of recent channel context, so it can disambiguate short or ambiguous lines the way a person following the conversation would |
+
+To use Claude: create a key at console.anthropic.com, switch the
+**"Quality engine"** dropdown to Claude Haiku — the **"Anthropic API
+key"** field is hidden until you do, since it is meaningless for Google — then
+paste the key into it. **Scope the key to a dedicated project with a spend
+limit** — it is stored in plaintext in Vencord's settings file, like every
+other Vencord plugin credential, not in your OS keychain.
+
+To use Gemini: create a key at aistudio.google.com, switch **"Quality
+engine"** to Gemini, and paste it into the **"Gemini API key"** field (also
+hidden until then). The same plaintext-storage caveat applies.
+
+To use Groq: create a key at console.groq.com (free, no credit card), switch
+**"Quality engine"** to Groq, and paste it into the **"Groq API key"** field
+(hidden until then, like the other two). The same plaintext-storage caveat
+applies.
+
+### Groq, and why it is here
+
+**Quota was the problem this engine exists to solve.** Gemini's free tier is
+5-20 requests per rolling minute depending on the model, which the automatic
+pipeline alone can consume essentially all of the time — so the manual ⚡
+button almost never had room, and clicking it produced an instant 429. Groq's
+free tier is **30 requests per minute**, with a daily cap between **1,000 and
+14,400 requests** depending on the model, and needs no credit card. That is an
+order of magnitude more headroom for the same job.
+
+Two other things are different about it, both consequences of it being an
+**OpenAI-compatible** service rather than a bespoke one:
+
+- **It states what is left, on every response, including successful ones.**
+  `x-ratelimit-remaining-requests`, `x-ratelimit-limit-requests` and
+  `x-ratelimit-reset-requests` come back with every 200. Gemini and Claude
+  report nothing at all unless they have already rejected you, which is why
+  the `✦ N` indicator could only ever show the plugin's own guess for them.
+  With Groq the indicator can show the truth (see "A `✦ N` … indicator" under
+  "Use"), and the rate gate re-tunes from the same numbers — but **only ever
+  downwards**. `x-ratelimit-limit-requests` on this provider is the per-*day*
+  figure, so "14,370 left, resets in 3 minutes" divides out to thousands per
+  minute, which says nothing about the per-*minute* ceiling the gate exists to
+  respect; a figure that would loosen the gate is ignored, and only one that
+  says "you are nearly out" is acted on. Unlike a quota learned from a 429,
+  this is not persisted: it describes one rate-limit window, not your key.
+- **A 429 uses the standard `Retry-After` header**, which is parsed directly.
+  Gemini's message-text parsing ("Please retry in 551.874307ms.") is Google's
+  own prose format and is deliberately *not* applied to Groq responses — a
+  coincidental match there would mean a fabricated cooldown, or a fabricated
+  `limit: N` retuning the rate gate from a number nobody stated.
+
+### The Groq model is a setting too, from the first release
+
+A **"Groq model"** field sits next to the key, defaulting to
+**`llama-3.3-70b-versatile`**. It is a setting for exactly the reason the
+Gemini one is (see the next section, which is worth reading even if you never
+use Gemini) — except that here the lesson was applied *before* the engine's
+first request rather than after a week of misdiagnosis. Which models a
+free-tier key may call moves under you on any provider, a model your key has
+no allowance for returns 429 to every request forever, and that is
+indistinguishable from ordinary throttling unless you can change the model
+without a rebuild.
+
+Unlike the Gemini default, this one has **not** been measured against a live
+key — there was no Groq key to hand when it was written. If `✦` upgrades never
+appear at all with a valid Groq key, that is the first thing to change: pick
+another model from console.groq.com's list and paste it in. The change applies
+to the next batch, with no restart.
+
+One deliberate consequence of that: the request sends **no `response_format`
+field**. JSON mode is per-model on OpenAI-compatible services, so asking for it
+on a model that does not support it would be a 400 on *every* request — and
+since the model is a field you can type into, that failure would be one paste
+away. The output schema is asked for in the prompt instead, where it cannot
+400, and the tolerant parser described under "The response shape is not what we
+asked for" handles the answer either way.
+
+### The Gemini model is a setting, and this matters
+
+A **"Gemini model"** field sits next to the key, defaulting to
+**`gemini-2.5-flash`**. It exists because *which* models a free-tier key may
+call changes without notice, and getting it wrong does not look like getting
+it wrong. Probed side by side against one real free-tier key, same endpoint,
+same instant:
+
+| Model | Result |
+|---|---|
+| `gemini-2.5-flash` | **200 — works** (the default) |
+| `gemini-3.6-flash` | 429 quota exceeded, on the *first* request, at any rate |
+| `gemini-2.5-pro` | 429 quota exceeded, likewise |
+| `gemini-2.5-flash-lite` | 404, no longer available |
+| `gemini-3-flash` | 404, not found |
+| `gemini-2.0-flash` | 500 |
+
+A model your key has **no free-tier allowance for at all** returns 429 to
+every request forever — not because you are sending too fast, but because
+that allowance is zero. It is the same status code as ordinary throttling,
+and for a long time this plugin reported it with the same message, so the
+symptom was "every subtitle stays `≈`, and a rate-limit toast appears seconds
+after every launch, no matter how little you send". Waiting does not help;
+changing the model does.
+
+So: **if `✦` upgrades stop appearing and you keep seeing a rate-limit toast,
+try a different model in that field.** A 429 that names a model now says so
+in the toast — it quotes the model and points you at the setting — so you can
+tell the two cases apart without reading the console. Leaving the field blank
+uses the default. Changing it takes effect on the next batch; no restart, and
+no rebuild of the plugin, which is the entire reason it is a setting rather
+than a constant in the source.
+
+Because the fast tier already gave the reader a Google line before the
+quality tier is ever asked, the LLM engine being unavailable costs nothing
+but the upgrade — there is no "falling back" to arrange, because Google was
+never bypassed in the first place. There are three ways the quality tier can
+be unavailable, and they recover differently:
+
+| Why | Recovers when |
+|---|---|
+| Key field is empty | Immediately, as soon as you paste a key |
+| Engine rejected the key (401/403) | Only after restarting Discord — the quality tier is disabled for the rest of the session |
+| Engine is rate limited (429) | Automatically, when the cooldown lapses (see below) |
+| The configured Gemini model has no free-tier allowance (a 429 that names the model) | Never on its own — change the **"Gemini model"** setting (see above). The toast names the model in this case |
+| The configured Groq model has no free-tier allowance | Never on its own — change the **"Groq model"** setting. Groq's 429s do not name a model, so the giveaway is `✦` *never* appearing rather than appearing intermittently |
+
+Each shows one toast, and only one per session — never one per batch.
+
+### Free-tier rate limiting
+
+All three quality engines are key-gated and rate-limited on typical free/low
+tiers, but not equally:
+
+| Engine | Free-tier request limit |
+|---|---|
+| Gemini (`gemini-2.5-flash`) | **5 per rolling minute**, measured live (see below) |
+| Groq | **30 per minute**, plus a daily cap of 1,000-14,400 depending on model. Not measured here — taken from Groq's published limits |
+| Claude | Not a free tier at all; limited by your account's spend |
+
+Groq's 30/minute is the reason it exists in this plugin: on the Gemini figure
+the automatic pipeline can consume the entire allowance, leaving the manual ⚡
+button with nothing to spend.
+
+Measured directly against the live Gemini API, for the
+default model (`gemini-2.5-flash`): the free-tier limit is **5 requests per
+rolling minute** — nine back-to-back requests succeeded, the tenth came back
+429 with `limit: 5` stated in the body. (An earlier measurement of 20/minute,
+which older notes in this file used to cite, was taken against a different
+model and does not apply to the current default — see "The Gemini model is a
+setting, and this matters" above for why that number moves under you at all.)
+Google is per-message with its own concurrency cap on the fast tier and is
+not affected by any of this.
+
+The quality tier's 20-second debounce and 25-message batch cap (see "Engines"
+above) are sized against the *previous* 20/minute figure: a single busy
+channel (60 messages/minute of chat) flushes the quality tier at roughly
+**2-3 requests a minute**, which was an order of magnitude under the old
+20/minute ceiling. Against the now-measured 5/minute ceiling for the default
+model that is a much thinner margin — comfortably under it, but no longer by
+an order of magnitude — and the debounce/batch sizing has not been re-tuned
+for it (that is left as follow-up work; see "Known limitations"). (An earlier
+version of this plugin used a fixed 3-second window, which meant a
+continuously active channel flushed every 3 seconds — 20 requests/minute,
+exactly on the *old* ceiling and four times over the now-measured 5/minute
+one, which is where most of the 429s came from.)
+
+Two things the debounce window does *not* smooth out. The first is opening
+many channels in a row: catch-up gives each channel its own queue and its own
+20-second timer, so hopping through 10 channels can still produce up to 10
+quality-tier requests clumped within the same few seconds. The second used to
+be scrolling — every chunk of history Discord loads re-ran catch-up with a
+fresh 20-message budget, so a long scroll-back turned into one quality-tier
+request after another until the quota was gone. That one is fixed at the
+source: scroll-back is fast-tier only now (see "The quality tier covers the
+live conversation and channel opens" above). The channel-hopping burst is
+what the client-side token-bucket gate below still exists for.
+
+A small client-side token-bucket gate (`rateGate.ts`) sits in front of every
+quality-tier (Claude/Gemini/Groq) request. A single live conversation's quality tier never needs
+more than one token at a time, so **normal chat is never throttled** by this
+gate at all — it is the channel-hopping burst above that it smooths out,
+spacing 10 clumped requests into the steady rate instead of firing them all at
+once and getting several back as 429s.
+
+**The gate re-tunes itself from the API's own reported limit, and remembers
+it.** (Groq additionally re-tunes it *downwards* from the remaining count on
+every successful response, without waiting for a 429 — see "Groq, and why it
+is here" above. That reading is not remembered, because it describes one
+window rather than your key.) A Gemini 429 body states the quota it just
+enforced — literally
+`limit: 5` in the middle of the error message for the default model — and
+when it does, the gate throws away its starting guess and aims at **half**
+the real number: 5/minute becomes 2/minute (one request every 30 seconds),
+20/minute (an older model) becomes 10/minute (one every 6 seconds), and a
+project limited to 4/minute becomes 2/minute (one every 30 seconds). This is
+deliberately adaptive rather than a compiled-in constant: free-tier quotas
+differ per project, per model, and get changed by the provider without
+notice, so any number hardcoded here is guaranteed to be wrong for someone —
+and being wrong in the generous direction is exactly what produced the 429
+storm.
+
+**The learned quota is persisted** (in Vencord's DataStore, alongside the
+cooldown mark) and re-read before the first quality-tier batch of the next
+session. It used to live only in memory, which meant every Discord launch
+reopened the gate at the untaught guess, spent requests at a rate the project
+had already been proven not to allow, and bought the same 429 — and the same
+toast — over again, seconds after starting. It is a fact about the API key and
+the project, not about a plugin session, so a restart (or toggling the plugin
+off and on) is not a reason to forget it. A corrupt or missing entry simply
+falls back to the starting guess.
+
+**A first-ever run starts deliberately slow — though not slow enough for the
+now-measured ceiling.** Before anything has been learned, the gate allows a
+burst of **3** requests and refills 1 every **15 seconds**. Worst case inside
+a single rolling minute is therefore the sustained rate plus a full burst — 4
++ 3 = **7 requests**. Against the 20/minute figure this was originally sized
+for, that was about a third of the ceiling; against the now-measured
+5-requests-per-minute ceiling for the default model, 7 is *over* it, not
+under. These starting-guess constants (`BURST_CAPACITY`/`REFILL_MS` in
+`rateGate.ts`) have not been re-tuned for the corrected number — that is left
+as follow-up work (see "Known limitations"). What already closes most of the
+gap automatically is the self-tuning retune described above: the first 429 a
+fresh install receives states the real `limit: 5`, and the gate immediately
+retunes to a sustained rate that respects it, typically within the very first
+burst. (The previous starting guess, before this one, was a burst of 5
+refilling every 4 seconds: 15 + 5 = 20 — the *old* measured ceiling exactly,
+on an install that had been told nothing at all — which is the mistake this
+plugin's history keeps re-learning at a smaller and smaller scale as the
+measured ceiling itself keeps coming down.) The timidity still costs nothing a
+reader notices once retuned: a busy channel needs only ~2-3 quality requests a
+minute, and the only thing the untaught defaults slow is the first
+channel-hopping burst on a brand-new install, once, before the first 429 — and
+what they delay there is a `✦` upgrade of a line Google has already put on
+screen, not a lost message.
+
+**Why half and not three-quarters** (this was 75%, and 75% was wrong). The
+provider counts a *rolling* 60-second window; the gate is a token bucket. The
+most a bucket can put into any one such window is its sustained rate **plus a
+full burst released at the window's start** — not the sustained rate alone.
+Against the now-measured 5/minute ceiling: at 75% that is `floor(5 × 0.75) =
+3`/minute sustained, and 3 plus a burst of up to 3 more is 6 — **over the
+ceiling**, leaving nothing for requests still in flight, for another client on
+the same key, or for the provider's window boundary not lining up with ours.
+At 50% it is `floor(5 × 0.5) = 2`/minute sustained, burst capped to match, so
+2 + 2 = 4 against the same ceiling — one request held in reserve. That margin
+is thinner than this reasoning was originally written against (a 20/minute
+ceiling left 7 in reserve at 50%, "better than a third of the quota"), but the
+conclusion is the same and, at a smaller ceiling, matters more, not less: 75%
+tips over, 50% does not. The throughput given up costs little here: the
+quality tier flushes at most one batch per channel per 20 seconds, so a live
+conversation on its own still never reaches the gate — it is specifically the
+channel-hopping burst (above) that now has only one request of headroom
+instead of several.
+
+### When the LLM engine is rate limited, nothing happens — and that is the point
+
+A 429 no longer costs the reader anything, because the fast tier already put
+a Google line on screen for every one of these messages roughly 20 seconds
+before the quality tier was even asked. There is nothing to fall back to and
+nothing to retry: the fallback already ran, before the LLM engine was ever
+touched.
+
+Concretely, on a 429 from Claude, Gemini or Groq:
+
+1. That engine is put in a **cooldown** for exactly as long as the API asked
+   for. The real captured Gemini 429 says "Please retry in 551.874307ms." in
+   the prose of its error message — there is no `Retry-After` header and no
+   structured `RetryInfo` field on a real response, so `rateHint.ts` parses
+   the sentence (a 30-second default only applies when nothing at all is
+   stated). Retrying straight back into a wall that just rejected us is how
+   roughly half of the observed API traffic became 429s.
+2. The rate gate re-tunes from any quota the same message reports (above).
+3. Every quality-tier batch that becomes due during the cooldown is **not
+   sent at all** — not to the LLM, and not to Google either, since the fast
+   tier already handled Google independently, ~20 seconds earlier, for these
+   exact messages. The `≈` line the reader already has simply stays.
+4. When the cooldown lapses, the quality tier resumes **automatically** on
+   the next batch. Nothing to restart, no setting to touch.
+
+You get one toast the first time this happens in a session, saying
+translations are running on Google only for now and roughly how long until
+the better engine is back — and only one, however many batches are affected.
+
+**Unless the 429 names a model**, in which case the toast says that instead:
+which model is over quota, that it may have no free-tier availability on your
+key, and to change the model in settings. Steps 1-4 above still happen
+identically — the cooldown, the retune, the untouched `≈` lines — because from
+the transport's point of view nothing is different. Only the sentence the user
+reads changes, and that sentence is the difference between "wait" and "change
+one setting". See "The Gemini model is a setting, and this matters" above.
+
+### The response shape is not what we asked for, and is parsed anyway
+
+Both LLM engines request a strict JSON schema —
+`{ "translations": [ { "id", "lang", "text", "skip" } ] }`. Claude honours it.
+Gemini's `interactions` endpoint, measured, **ignores it**: the same prompt
+and the same schema come back as a ```` ```json ````-fenced **bare array**
+with **numeric** ids. All three deviations used to be fatal — the fence alone
+made the parse throw, which counts as retryable, so the batch was sent twice
+and then failed — and that, together with the model problem above, is why no
+`✦` line ever reached the screen.
+
+Parsing (`engines/llmShared.ts`, shared by both engines) is therefore tolerant
+about *packaging* and unchanged about *content*: a whole-string code fence is
+unwrapped, either a bare array or the `translations` object is accepted, and a
+numeric id is coerced to a string. But an id the model invented is still
+dropped, a row with no usable `lang`/`text` is still rejected, every requested
+id still comes back with an explicit verdict, and a response that is neither
+shape is still an error rather than a silent empty result.
+
+`{ deferred: true }` (the "⏳ translation delayed — retrying" line) is a
+holdover from a design where the LLM engine was the reader's *only*
+translator and a 429 genuinely left them with nothing. **Nothing writes it
+any more.** With the fast tier always running independently, a rate-limited
+quality tier has a Google line to leave in place instead — see "The four-way
+resolved-state model" below for where you can still encounter one (a cache
+entry from before this change, read back off disk).
+
+### Two debounce windows, sized for two different jobs
+
+The fast tier exists purely to get *something* on screen quickly: **Google,
+700ms debounce, up to 10 messages per request.** Google is free and
+unmetered, so the only cost is a slightly larger number of small HTTP calls,
+which is a good trade for a subtitle appearing in about a second.
+
+The quality tier exists to make that something *right*, without spending the
+free-tier budget doing it: **the configured LLM, 20-second debounce, up to 25
+messages per request.** Sized against the 20-requests/minute figure this
+project measured for an earlier model — a busy channel flushes the quality
+tier at roughly 2-3 requests a minute, which was an order of magnitude under
+that ceiling. Against the now-measured 5/minute ceiling for the current
+default model it is a comfortable margin still, just not an order-of-magnitude
+one (see "Free-tier rate limiting" above for the corrected numbers and what
+they change). (An earlier, single-tier version of this plugin used a 3-second
+debounce for the LLM engine directly, which sat exactly on the old ceiling and
+produced the 429 storm this two-tier design exists to fix.)
+
+The reader never waits on the quality tier's window — the fast tier already
+gave them a line. The 20 seconds only decide how long that line stays
+Google's before the better one silently replaces it.
+
+If a 429 does still get through, the API's own retry hint is read from
+whichever of three places actually carries it: the prose of Gemini's error
+message ("Please retry in 551.874307ms." — the only one a real Gemini 429 has
+been observed to use), a structured `RetryInfo`/`retryDelay` entry (kept as a
+fallback because other Google APIs do send it), or a `Retry-After` header. The
+guessed 30-second pause applies only when none of the three is available.
+
+## Troubleshooting
+
+**Nothing translates at all.**
+1. Confirm the plugin is enabled: Settings → Plugins → VcTranslate.
+2. Confirm the *channel* is turned on. Server channels are covered by
+   default ("All servers" / `globalAuto` is
+   checked in the plugin's own settings page out of the box); if that's been
+   turned off, or the conversation is a DM or group DM (never covered by
+   `globalAuto`), it needs the 🌐 popover button on a message in that
+   conversation to show the "on" state instead.
+3. Confirm you were *looking at* that channel when the message arrived. Live
+   translation only happens for the channel on screen; anything else is
+   translated when you open it. If a channel's backlog does not translate on
+   open either, that is a real bug — see the cold-channel item below.
+4. A non-English message in an active channel that still shows nothing is
+   worth checking against the other items below (skip rules, the local
+   English check, cold-channel catch-up) before assuming the plugin is broken.
+
+**A message you expected to translate is silently skipped.**
+By design, in one of three ways. Locally, structurally: your own messages,
+messages that are only emotes, mentions, links, digits/punctuation, or emoji
+once those are stripped out, and messages that are entirely chat shorthand —
+plain (`gg`, `brb`) or elongated (`yesssss`, `helloooooo`, `goooooood
+morninggggg`, see "Use" above) — are treated as untranslatable and never sent
+to any engine (see `skip.ts`). Locally, linguistically: with an English
+target, a message the plugin can confidently place as English is skipped
+without a request (`detectLang.ts`) — this errs heavily toward sending, so if
+a *non*-English message is ever skipped this way, that is a bug worth
+reporting. Remotely: the engine itself reports a message that is already in
+your target language, and there is nothing to subtitle. All three are deliberate —
+they avoid burning API calls on content with nothing to translate. The second
+kind is recorded as resolved rather than left blank, so reopening the channel
+does not re-request the whole already-translated backlog. To see WHICH of
+these (or which tier) actually decided a specific message's fate, turn on
+**"Log detailed per-message translation decisions"** below and check the
+console — it is built for exactly this question.
+
+**Diagnosing a specific message step by step (why no subtitle appeared, why ⚡
+seemed to do nothing, or anything else that "should have happened but
+didn't").**
+Settings → VcTranslate → **debugLogging** ("Log detailed per-message
+translation decisions...", off by default) makes every per-message decision
+this plugin makes show up in the Discord developer console
+(Ctrl+Shift+I / Cmd+Option+I), tagged `VcTranslate` like every other log line
+this plugin prints, so filtering the console for that name shows only this
+plugin's output. **It includes message text** — the whole point is a decision
+log that does not hide the message it decided about — and everything printed
+stays on your own machine; nothing about the setting sends anything anywhere.
+With it on, for a given message id you can read straight through its whole
+life: `[enqueue]` says which tier(s) it went to, or which local rule
+(`shouldSkip` vs `isConfidentlyTargetLanguage`) skipped it and cost nothing;
+`[flush]` says whether a batch was blocked before it was even sent (cooling
+down, waiting on the rate gate, a stale generation) or actually went out;
+`[response]` says what came back for each id — a translation, a skip, a
+failure, or (for an LLM engine) an id in the response that was never in the
+request, dropped as hallucinated; `[write]` says whether the result actually
+landed in the store or was refused, and why (a marker over a real
+translation, or a lower-ranked engine trying to replace a higher one); and
+`[force-quality]` says whether a ⚡ click was received at all and which guard,
+if any, stopped it (no LLM configured, already in flight). That covers the
+motivating case directly: a ⚡ click that "spent a request" but produced no
+subtitle is one of — cooling down (`[flush] blocked — cooling down`), the
+rate gate had nothing to give (`[flush] blocked — stale generation` after a
+wait, or the click never got past `[force-quality] blocked`), the model
+answered `skip`/`failed` for that id (`[response] ... skip` / `... failed`),
+or the model answered a *different* id entirely (`[response] ... dropped as
+hallucinated`) — and the log line tells you which, in one look, instead of a
+few rounds of guessing. With the setting off there is no change in behaviour
+and nothing extra is computed — every call site is guarded on the setting
+before any log string is even built, not just before it is printed.
+
+**A message edit doesn't update the subtitle.**
+It should: an edit clears the old subtitle and re-queues the new text, so the
+subtitle reappears within about a second. Updates that carry no message text
+(a link preview loading, an attachment finishing processing — Discord fires
+the same event for those) are deliberately not re-translated, since the text
+has not changed.
+
+**Translations stopped looking as good as they used to, with no visible error.**
+A bad or rejected Anthropic API key does not disable the plugin — the fast
+(Google) tier keeps running exactly as before, and only the quality tier is
+disabled for the rest of that Discord session (one toast is shown the first
+time this happens; after that it's quiet, so it doesn't spam you every
+batch). Selecting Claude with the key field still empty shows its own,
+separate one-per-session toast and leaves the quality tier off until you
+paste one. If translations look "worse than they used to" — i.e. every
+subtitle is stuck at `≈` — that's expected: the quality tier stays off until
+you fix the key and **restart Discord** (a rejected key is per-session and
+does not clear itself while Discord stays open, even if you re-paste a
+working key — see the item below).
+
+**Pasted a new/fixed API key but Claude still isn't being used.**
+Once a session has disabled the quality tier for a rejected key (see above),
+it stays disabled until Discord restarts, even after you fix the key in
+settings. This is intentional — it avoids retrying a broken key on every
+single batch — but it means "fix the key" alone does not bring Claude back
+mid-session; restart Discord afterward.
+
+**Opening a channel you haven't visited this session doesn't translate its
+backlog ("cold channel").**
+Catch-up on channel open relies on two Discord Flux events: `CHANNEL_SELECT`
+(payload field confirmed against real Vencord plugin usage) and
+`LOAD_MESSAGES_SUCCESS`, which fires once Discord has actually fetched a
+channel's message history — necessary because `CHANNEL_SELECT` can arrive
+before that history exists locally. `LOAD_MESSAGES_SUCCESS` is a real,
+type-confirmed Discord event, but **no plugin in the Vencord tree subscribes
+to it**, so its payload's channel-id field name (`channelId` vs.
+`channel_id`) could not be verified against a real dispatch — it's inferred
+from `MessageStore`'s naming convention, not confirmed. If cold-channel
+catch-up never fires for you, open the Discord developer console (Ctrl+Shift+I
+/ Cmd+Option+I) and look for a warning tagged `VcTranslate` that says
+`LOAD_MESSAGES_SUCCESS payload had no channelId/channel_id; ... Payload keys:`
+followed by the event's actual keys. That tells you the real field name so
+the fix is a one-line change in `index.tsx`'s `onMessagesLoaded`. Please
+report it if you hit this — it's the one behavior in this plugin that
+automated tests could not pin down.
+
+**A message shows "⚠ translation failed."**
+Only the fast (Google) tier ever writes this marker — a quality-tier failure
+is invisible by design (see below), so this always means Google itself came
+back broken for that message (network issue, an unparseable response, an id
+the model never returned a usable row for) after retrying once. It is not
+stuck permanently: the next time you open (or reopen) that channel, catch-up
+retries any message still marked failed automatically.
+
+**Subtitles briefly say `≈` before switching to `✦`.**
+Expected, and not an error at all — this is every message's normal life
+cycle when an LLM engine is configured. `≈` is the fast tier's Google line,
+which appears in about a second; `✦` is the quality tier's upgrade, which can
+take up to ~20 seconds to arrive. A subtitle marked `≈` for a few seconds
+is working exactly as designed.
+
+**Subtitles stay `≈` for minutes, well past the ~20 second upgrade window, even though Claude/Gemini is selected.**
+This is the state worth investigating. The quality tier is unavailable right
+now — most often rate limited, sometimes an empty or rejected key (see the
+recovery table under "Engines" above) — so only the fast tier's Google line
+is showing. A toast said so once when it started. The `✦` marker
+comes back on its own as soon as the engine recovers; you do not have to
+restart anything. If it never comes back, the cause is a *rejected* key
+rather than a rate limit — that one does pin the session to Google-only, see
+the two items above.
+
+**Subtitles have *never* shown `✦` — not once, in any channel, on any launch — and Gemini is selected with a valid key.**
+This is a different problem from the one above, and the giveaway is the word
+*never*: a rate limit is intermittent, this is not. The usual cause is that
+your key has **no free-tier allowance for the configured model**, which
+returns 429 to every request from the very first one. Open the plugin
+settings and change **"Gemini model"** (the default, `gemini-2.5-flash`, is
+what was measured working; see "The Gemini model is a setting, and this
+matters" under "Engines"). If the rate-limit toast you saw quoted a model
+name, that is exactly this case, and the model it quoted is the one to
+change. The change applies to the next batch — no restart needed, though a
+restart also clears the per-session ledger so already-attempted messages get
+another try.
+
+One caveat on "comes back on its own", and it applies per message rather than
+globally: the messages whose single quality attempt was actually *spent*
+while the engine was failing are not asked again this session (see "one
+request per message, per session" under "Engines"), so those specific lines
+stay `≈` until you edit them or restart. Everything the tier never got to —
+new messages, and anything that was still queued when the cooldown took hold
+— upgrades normally once the engine recovers.
+
+**A message shows a dim "⏳ translation delayed — retrying" instead of ≈ or ⚠.**
+This should now be rare to the point of not happening at all in a fresh
+session: nothing in the current code writes this marker any more (see "When
+the LLM engine is rate limited" above — a rate-limited quality tier now
+leaves the existing Google line alone instead). The one way to still see it
+is a translation cache entry written by an *earlier* version of this plugin,
+persisted to disk, and read back on a later launch before it has been
+re-requested. It resolves itself exactly like a failure does — reopening the
+channel retries it.
+
+**Which engine produced this line? / Some subtitles show `≈`, others `✦`.**
+Translations are cached by (message, target language) only — deliberately
+*not* by engine. That is what lets a Google line and an LLM line for
+different messages sit side by side legibly in the same channel, and it is
+the precondition for the two-tier design itself: a message's key does not
+change between the fast tier's write and the quality tier's later upgrade of
+the very same entry. The consequence you will actually notice: **switching
+the configured engine does not re-translate anything you have already
+read.** A message already upgraded to `✦` by Gemini keeps that `✦` line
+after you switch to Claude; only messages the quality tier has not gotten to
+yet use the newly-selected engine. That is intentional — re-spending an LLM
+budget upgrading messages you have already read is the least valuable thing
+it could be spent on. If you genuinely want a specific message redone by the
+new engine, edit anything in your own copy of it, or reopen the channel
+after the message has scrolled out of the cached 500.
+
+### The four-way resolved-state model
+
+Internally, every message id a translation was ever requested for resolves to
+exactly one of four states (`store.ts`'s `StoredTranslation`), so that "no
+entry yet" always means "never requested" and nothing silently falls through
+the cracks. All four are engine-independent: the entry records which engine
+produced it (`via`) rather than being filed under that engine. A stricter
+rule then governs which tier may overwrite which state (see "Engines"
+above): an LLM result outranks a Google one, and a marker
+(failed/deferred/skipped) never overwrites a real translation from either
+tier.
+
+| State | Meaning | Rendered as | Retried on next catch-up? |
+|---|---|---|---|
+| `{ lang, text, via }` | A real translation, plus the engine that produced it. Two tiers can both write this key over a message's life — first the fast tier, then the quality tier upgrading it in place | The dimmed subtitle, prefixed `✦` (Claude/Gemini) or `≈` (Google) | No — already done, whichever engine did it. A Google-authored entry does still leave the *quality* tier free to upgrade it (see `needsQuality` below), but only until that tier has actually spent its one request on this message — see "one request per message, per session" under "Engines" |
+| `{ skipped: true, via? }` | The engine reported the message is already in your target language. `via` matters: a Google skip is not authoritative — Google echoes short or romanized text back unchanged when it has simply given up, which looks identical to "already translated" — so only an *LLM* skip (`via` set to `claude`/`gemini`) actually closes the message. A Google skip stays open to the quality tier | Nothing (no subtitle) | Only if an LLM hasn't confirmed it yet |
+| `{ failed: true }` | A genuine attempt came back broken. Only ever written by the fast tier — see "⚠ translation failed" above | "⚠ translation failed" | Yes |
+| `{ deferred: true }` | Historical only — **nothing writes this state any more.** It dates from a design where the LLM engine was the reader's only translator and a 429 left them with genuinely nothing. Kept in the type and in the renderer purely so a cache entry persisted by an earlier version of the plugin still renders sensibly instead of falling through to "⚠ translation failed" | "⏳ translation delayed — retrying" | Yes |
+
+`failed` and `deferred` look and read differently on purpose: a plain English
+message caught in a 429 storm was never actually wrong about anything, and
+telling the user "failed" for it is what used to make a rate-limited batch
+look like the plugin being broken. That distinction is now moot for anything
+translated going forward — the fast tier means a rate-limited quality tier
+simply leaves the existing `≈` Google line in place rather than writing any
+marker at all — but the rendering stays in case an old `deferred` entry is
+still sitting in your persisted cache.
+
+## Privacy
+
+Message text is sent to **two** providers, not one. Every message goes to
+Google's free, unofficial translation endpoint
+(`translate.googleapis.com`) — always, whatever engine is selected, because
+that is the fast tier — and no data-processing agreement exists for that
+endpoint. If you have also configured an LLM engine, that *same* message
+text is sent, independently, to Anthropic's API (`api.anthropic.com`), to
+Google's Gemini API (`generativelanguage.googleapis.com`), or to Groq
+(`api.groq.com`), whichever you selected. Selecting an engine adds a second
+recipient; it does not replace
+the first. This includes the text of other people's messages in the channel,
+not just your own, since the whole point of the plugin is translating
+incoming messages. If you're running this in a channel with people who
+haven't opted into that, that's worth knowing plainly, as a fact about what
+the plugin does — not a recommendation either way.
+
+**Translations are now stored on disk, not just in memory.** Up to 2,000
+entries (message id, target language, translated text, and which engine
+produced it) are written to Vencord's `DataStore` — the same IndexedDB storage
+the per-channel toggle list uses — so a Discord restart doesn't re-translate,
+and re-spend on, the same backlog. Two consequences worth stating plainly:
+
+- Translations of **other people's** messages now persist across restarts
+  rather than dying with the process. They are bounded only by that 2,000-entry
+  cap (oldest evicted first), not by time, so a translation can outlive the
+  original message being deleted in Discord.
+- The text is stored unencrypted, alongside the rest of Vencord's plugin data.
+  Anything with access to that directory can read it.
+
+To wipe it, clear Vencord's `DataStore` (the same action that would forget your
+per-channel toggles).
+
+**The `debugLogging` setting (off by default) prints message text to your own
+local console.** Nothing about it changes what leaves your machine or where —
+Google/Claude/Gemini/Groq already receive the same text either way, described
+above — it only controls whether that text (and the plugin's decision about
+it) is *also* printed to the Discord developer console for you to read. See
+"Diagnosing a specific message" under Troubleshooting for what it shows.
+
+## Known limitations
+
+- Incoming messages only. No outgoing translation, no voice, no DMs — desktop
+  app only (it uses `pnpm inject`'s desktop patch target and Node-side IPC for
+  the network calls; there is no browser-userscript equivalent of the native
+  bridge).
+- `index.tsx` is currently ~1,720 lines, against this project's own 200-line
+  per-file convention. It grew past that budget across several correctness
+  fixes (catch-up de-duplication, cold-channel handling, session fallback,
+  edit re-translation), again with the budget work (focused-channel gating,
+  batch sizing, cache loading), again with the two-tier rework (a second
+  batcher, per-tier in-flight tracking, the upgrade-only write path), again
+  with the force-quality popover action (a second popover registration, its
+  own click handler), and again with the chat-bar quota indicator (a third
+  rendered UI surface, sharing its availability logic with the popover
+  label), where splitting mid-change would have made the diffs harder to
+  review than the size overrun was worth. Splitting it — likely into the
+  Flux handlers/catch-up logic, the popover buttons and chat-bar indicator,
+  and the accessory component — is planned as a follow-up task, not done
+  here.
+- The rate gate's untaught starting guess (`BURST_CAPACITY`/`REFILL_MS` in
+  `rateGate.ts`) was sized against the 20-requests/minute figure this project
+  originally measured, against an earlier model. The default model's real
+  ceiling, now measured at 5/minute, is *tighter* than that guess allows for
+  on a brand-new install's first burst — see "A first-ever run starts
+  deliberately slow" under "Free-tier rate limiting". The gate's self-tuning
+  (also described there) closes most of the gap automatically, typically
+  within the first 429, but the compiled-in starting numbers themselves have
+  not been revisited for the corrected ceiling. Re-deriving them is follow-up
+  work, not done here.
+
+## Tests
+
+```bash
+cd src/userplugins/vcTranslate && npx vitest run
+```
+
+**Run it from this directory.** `vitest.config.ts` lives here and supplies the
+aliases that stub out Vencord's modules. Run from the repo root, vitest never
+finds the config and `tests/index.test.ts` fails to import — and because the
+summary line counts only tests in files that actually loaded, it silently
+reports a *smaller* pass count that still looks like success.
+
+`vitest` is not saved as a dependency; in a fresh clone run `npm i -D vitest`
+first.
+
+660 tests across 21 suites (`batcher`, `beaconWiring`, `buildStamp`, `claude`,
+`detectLang`, `gemini`, `google`, `groq`, `index`, `llmShared`, `native`,
+`rateGate`, `rateHint`, `retry`, `romanized`, `skip`, `statusBeacon`,
+`statusFile`, `statusShape`, `store`, `upgrade` — see `tests/`). `tests/fixtures/`
+holds shared non-test data, notably the verbatim bytes of a real Gemini 429
+captured against the live API (which `rateHint.test.ts` and `gemini.test.ts`
+both assert against so they cannot drift apart from each other or from
+reality) and the verbatim text of a real *successful* Gemini response — fenced,
+a bare array, numeric ids — which `llmShared.test.ts` and `gemini.test.ts`
+share for the same reason.
+
+Twenty of the twenty-one target pure-logic modules with no Discord/Vencord
+runtime dependency (`store.test.ts` is pure logic plus the `DataStore` stub,
+which its persistence cases drive directly; `upgrade.test.ts` and
+`romanized.test.ts` are the two-tier and script-mismatch modules, also pure
+logic). `index.test.ts` covers `index.tsx` — the Flux wiring, the
+catch-up logic, the subtitle accessory, and both popover buttons (including
+the force-quality action) — against the small set of Vencord stand-ins in
+`tests/stubs/` (`FluxDispatcher`, `MessageStore`, `UserStore`, `ChannelStore`,
+`Toasts`, `LocaleStore`, `DataStore`, `MessagePopover`, the settings API, and
+just enough of `React` to call a function component and inspect what it
+returned). `vitest.config.ts` aliases the `@api/*`, `@utils/*` and
+`@webpack/common` specifiers onto those stubs. What remains uncovered is the
+part that only exists inside a running Discord — whether Discord actually
+dispatches the events with the payload shapes assumed here, and the real
+network calls — which is what the manual checklist below is for.
+
+## Manual verification checklist
+
+The automated suite covers every module, `index.tsx` included, but it does so
+against stand-ins for Discord. It cannot cover what only exists once this
+plugin is running inside a real, injected Discord client — whether Discord's
+own events carry the payload shapes assumed here, the message-hover popover,
+actual network calls, and Discord's restart/reload behavior. The items below
+are exactly that set, flagged during review as unverifiable from source
+alone. **Nothing in this table has been executed.** It is a checklist for you
+(the person running `pnpm inject` and Discord) to work through, not a report
+of results.
+
+| # | What to do | Expected | Pass/Fail |
+|---|---|---|---|
+| 1 | Post a non-English message in an enabled channel | A dimmed italic subtitle appears within ~1s, marked `≈` (the fast tier, Google) — this is always the first line you see, regardless of which engine is configured. Hovering it names Google and the detected language. If Claude/Gemini is configured, it silently upgrades in place to `✦` afterwards, usually within ~20s (see row 32) | ☐ |
+| 1b | With some messages translated by Google only (no LLM configured yet), switch the engine to Claude or Gemini and reopen the channel | The existing `≈` subtitles stay visible while the channel loads. Because a Google line is never a finished answer once an LLM is configured, catch-up also re-offers those exact messages to the new quality tier — expect new Claude/Gemini requests, and some of those lines flipping to `✦` shortly after. Only messages an LLM had *already* translated before the switch are left untouched | ☐ |
+| 2 | Post a message already in your target language, then reopen the channel | No subtitle either time. **Engine = Google:** there is no second tier at all, so the Google skip is final — nothing further is ever requested on reopen. **An LLM is configured but hasn't confirmed the skip yet:** reopening may send ONE more quality-tier request to confirm it — a Google-only skip is not authoritative (see "The four-way resolved-state model"). Once an LLM has confirmed the skip, reopening again sends nothing further for that message | ☐ |
+| 3 | Post an emote-only message, a link-only message, or your own message | No subtitle, no API call | ☐ |
+| 4 | Have three people post at once in three different languages | All three translate, in one batch | ☐ |
+| 5 | Edit a message that already has a translated subtitle | Subtitle re-translates to match the edit (the old one clears, the new one appears within ~1s) | ☐ |
+| 6 | Scroll far up in a channel, then back down, then scroll the same stretch again | Subtitles persist. Scrolling up loads older history, which re-runs catch-up **for the fast tier only**: newly-loaded untranslated messages get a `≈` Google line (expected), and *nothing at all* should go to Claude/Gemini, however far you scroll — watch the provider's usage dashboard while you do it. A `✦` appearing on a stretch you only ever scrolled past is the bug. The second pass over the same stretch must send nothing for either tier | ☐ |
+| 7 | **Cold channel:** open a channel not visited yet this session | Its backlog translates without needing a second channel selection. If it does not, check the console for the `VcTranslate` warning listing `Payload keys:` — see Troubleshooting | ☐ |
+| 8 | Count how many times `LOAD_MESSAGES_SUCCESS` fires for one channel open (scrolling up to load more history also dispatches it) | Confirm no duplicate API spend from repeated catch-up triggers for the same channel open. At most **one** of them may reach the quality tier — the first, which is the opened channel's own backlog | ☐ |
+| 9 | Re-select a channel roughly 3s into a pending translation | No second request is sent (check Anthropic usage dashboard or the native-side log) | ☐ |
+| 10 | Let a message fail (e.g. during a network blip), then reopen its channel | It retries on the next channel open and stops showing ⚠ once it succeeds | ☐ |
+| 11 | Open the 🌐 popover item on a message; toggle a channel off | Popover renders correctly; toggling off hides subtitles for that channel | ☐ |
+| 11b | **Force-quality:** with Claude/Gemini configured, scroll back to an older `≈`-only message and click the ⚡ "Translate with \<engine\> now" popover item | A quality-tier request goes out for that one message right away, and the `≈` line upgrades to `✦` in place, without waiting for the normal 20s debounce or any channel reopen | ☐ |
+| 11c | **Force-quality, hidden cases:** with engine = Google, or on a message already showing `✦` | The ⚡ button does not appear in either case | ☐ |
+| 11d | **Force-quality, cooldown:** trigger a rate-limit cooldown (row 34), then click ⚡ on a different `≈` message while it is active | No new request goes out (check the provider dashboard); the existing rate-limit toast/behavior stands, nothing appears to silently fail | ☐ |
+| 11e | **Quota indicator, visible states:** with Claude/Gemini configured and a key set, look at the chat bar next to the message box | A `✦ N` indicator is present, N matching how many ⚡ clicks would actually go through right now. Hovering it explains the number in words | ☐ |
+| 11f | **Quota indicator, ticking:** click ⚡ a few times in a row (or wait through a channel-hop burst) and watch the indicator | The number drops as requests are spent and climbs back up roughly a second at a time as the gate refills, with no page reload needed | ☐ |
+| 11g | **Quota indicator, cooldown:** trigger a rate-limit cooldown (row 34) and watch the indicator | It switches to a `✦ M:SS` countdown in place of the token count, and counts down to zero | ☐ |
+| 11h | **Quota indicator, hidden cases:** with engine = Google, or an LLM selected with no key set | No indicator appears in the chat bar at all | ☐ |
+| 11i | **Force-quality, in-flight hint:** click ⚡ on a message and watch its subtitle immediately (before the response lands) | `⚡ translating…` appears right away — on its own for a message with no prior translation, or appended after the existing `≈` line without removing it | ☐ |
+| 11j | **Force-quality, in-flight label:** click ⚡, then reopen the popover on the same message before the request settles | The label now reads "...(already translating…)" instead of a token count, and clicking it again sends nothing new | ☐ |
+| 11k | **Force-quality, failure hint:** click ⚡ on a message while the engine is misconfigured so the request fails (or just watch a real failure happen) | `⚡ translating…` is replaced by a brief `⚡ translation failed` hint (hover it for a short reason), which clears itself after a few seconds — any existing `≈` line stays on screen throughout, and the message does not turn into a permanent `⚠ translation failed` marker | ☐ |
+| 11l | **Force-quality, cooldown/gate hint:** click ⚡ while the engine is cooling down (row 11d) | The hint reads `⚡ cooling down` (or `⚡ rate limited` if the click was dropped while queued behind the rate gate) rather than `⚡ translation failed` — visibly different wording for "wait" vs. "something's wrong" | ☐ |
+| 12 | Simulate a persistence failure if you can (e.g. revoke write access to Vencord's settings/data directory) | A failure toast appears and the toggle does not stick | ☐ |
+| 13 | Switch engine Google → Claude mid-session | New messages get a `≈` line from the fast tier and, up to ~20s later, a `✦` line from Claude. Messages already cached under Google keep their `≈` result until you next reopen that channel — reopening lets catch-up offer them to Claude too, same as row 1b | ☐ |
+| 14 | Paste a valid API key mid-session while engine is set to Claude | Translations start working without a restart (this was a Critical bug in an earlier round — confirm it stays fixed) | ☐ |
+| 15 | Set engine to Claude with an invalid API key | Exactly one toast, then Google is used for the rest of the session | ☐ |
+| 16 | Disconnect your network, then post a message | ⚠ marker appears, no popup dialog, no console spam | ☐ |
+| 17 | Reconnect the network, post again | Translation resumes normally | ☐ |
+| 18 | Disable the plugin mid-flight (a translation in progress), then re-enable it | The next channel-open catch-up still enqueues correctly | ☐ |
+| 19 | Restart Discord entirely | Previously enabled channels are remembered | ☐ |
+| 20 | Post a message containing a link, and let Discord's preview embed load | The embed's own `MESSAGE_UPDATE` must not trigger an extra translation request for that message — you should see the normal fast-tier request (plus one quality-tier request if an LLM is configured), not a duplicate of either from the embed loading | ☐ |
+| 21 | Open the plugin settings with engine = Google, then switch to Claude | The "Anthropic API key" field is absent for Google and appears for Claude | ☐ |
+| 22 | Select Claude while the key field is empty, then post a message | Exactly one "no Anthropic API key" toast; pasting a valid key afterwards starts using Claude with no restart | ☐ |
+| 23 | Check the "Reading language" setting on a fresh install with a non-English Discord client | It defaults to your client's language as a bare code (`pt`, not `pt-BR`) | ☐ |
+| 24 | **Focus:** with `globalAuto` on, sit in channel A while someone posts a non-English message in channel B | Nothing is requested for B while you are in A (check the provider dashboard). Opening B translates its recent backlog then | ☐ |
+| 25 | **Focus, popout:** pop a channel out into its own window and post there while the main window is on another channel | Expected to *not* translate live — a known, documented simplification. It should still translate once that channel is opened in the main window | ☐ |
+| 26 | **Local English skip:** post a plain English sentence in an English-target channel | No subtitle **and no API request at all** (the dashboard count must not move) | ☐ |
+| 27 | **Local English skip, the timid half:** post `yess`, `THIS`, or a Spanish sentence | These are still sent (`yess`/`THIS` may return nothing to show; the Spanish one must get a subtitle). A missing Spanish subtitle here is a real bug — report it | ☐ |
+| 28 | **Persistence:** translate a channel, fully restart Discord, reopen the same channel | Subtitles are already there immediately on reopen. If any of them were still Google-only (`≈`) when Discord closed and an LLM is configured, catch-up sends fresh quality-tier requests to upgrade those specific ones to `✦` — that is expected, not a bug. Messages already upgraded to `✦` before the restart generate no new requests | ☐ |
+| 29 | **Persistence, edited message:** edit a translated message, restart Discord, reopen the channel | The subtitle matches the *edited* text — the pre-edit translation must not come back from disk | ☐ |
+| 30 | **Batch size:** post 3-4 messages quickly in a channel with Claude/Gemini selected | Each message still gets its own `≈` line within about a second (the fast tier is per-message, not delayed by batching). Then, up to ~20 seconds later, all of them upgrade to `✦` together, from a single quality-tier request carrying up to 25 messages (`QUALITY_MAX_BATCH`/`QUALITY_DEBOUNCE_MS`) | ☐ |
+| 31 | **Two-tier, happy path:** post a foreign message in a busy channel | A `≈` subtitle appears within ~1s | ☐ |
+| 32 | **Two-tier, upgrade:** keep watching that same message for ~30s | It changes to `✦` with a better translation | ☐ |
+| 33 | **Two-tier, backlog:** open a channel with a long untranslated backlog | `≈` lines appear immediately, `✦` follows in batches | ☐ |
+| 34 | **Two-tier, quota exhausted:** exhaust the Gemini quota, then post a message | `≈` still appears; no `⚠`, no `⏳`, no toast storm | ☐ |
+| 35 | **Two-tier, quota headroom:** watch the AI Studio rate-limit dashboard for 10 min of normal use | Under 5 requests/min (the measured free-tier ceiling for `gemini-2.5-flash` — see "Free-tier rate limiting") | ☐ |
+| 36 | **Romanized text:** post romanized Darija: `ana bghit nmchi l dar` | Either no ≈ line, or one marked `ar?`; the ✦ line that follows says "I want to go home" (NOT "don't want") | ☐ |
+| 37 | **Romanized text, pass-through:** post `baraka 3lik mn dak monster` | Google returns it unchanged so there may be no ≈ line at all — but a ✦ line still arrives and mentions the drink | ☐ |
+| 38 | **Romanized text, DM prerequisite:** before rows 36-37, confirm the DM is enabled with the 🌐 button first | Rows 36-37 do nothing in a DM that was never enabled; `globalAuto` never covers DMs | ☐ |
+| 39 | **Model setting, visibility:** open the plugin settings with engine = Google, then switch to Gemini | The "Gemini model" field is absent for Google and appears for Gemini, alongside the key field, pre-filled with `gemini-2.5-flash` | ☐ |
+| 40 | **Model setting, the fix it exists for:** set "Gemini model" to `gemini-3.6-flash`, post a foreign message, and watch | A `≈` line still appears. One toast quotes `gemini-3.6-flash`, says it may have no free-tier availability, and points at the settings — *not* the generic "rate limited" wording. No `✦` arrives | ☐ |
+| 41 | **Model setting, recovery without a restart:** with row 40's toast on screen, set the model back to `gemini-2.5-flash` and post another message | The next quality batch uses the new model and the message upgrades to `✦`, with no Discord restart and no reinstall | ☐ |
+| 42 | **Model setting, blank:** clear the "Gemini model" field entirely, then post a message | Translation still works — a blank field means the default, and must never send an empty model (which would be a 400 on every request) | ☐ |
+| 43 | **Groq, first run:** create a free key at console.groq.com, set "Quality engine" to Groq, paste the key, post a foreign message | The "Groq API key" and "Groq model" fields appear only once Groq is selected, the model field pre-filled with `llama-3.3-70b-versatile`. A `≈` line appears within ~1s and upgrades to `✦` within ~20s. **This is the row nothing here could verify — there was no Groq key on the machine when this was written, so the default model and the live response shape are both unmeasured** | ☐ |
+| 44 | **Groq, model setting:** set "Groq model" to something that does not exist (`llama-nonsense-1b`) and post a message | The `≈` line stands and no `✦` arrives. Setting it back to the default makes the next batch work again, with no restart and no rebuild — that is the entire reason it is a setting | ☐ |
+| 45 | **Groq, the indicator tells the truth:** with Groq configured, watch the `✦ N` indicator and hover it | The number reflects Groq's own reported remaining quota whenever that is the tighter of the two limits, and the tooltip says so in those words. It must never show a comfortable number while ⚡ produces an instant 429 — that is the defect this replaces | ☐ |
+| 46 | **Groq, headroom:** run a normal session and watch console.groq.com's usage | Comfortably under 30 requests/minute, and the ⚡ button has room to spend when you click it — which was the whole point of adding this engine | ☐ |
+
+If you'd rather work from the brief's original phrasing, items 1-3 and 5-6
+above correspond to the brief's manual checklist 1-8 (minus a redundant
+"delete a message" case not repeated here since it's a strict subset of
+"edit"); items 7-23 are the additional cases raised in code review that the
+brief's original list did not cover (cold-channel catch-up, duplicate-event
+counting, mid-flight re-selection, retry-on-reopen, persistence-failure UX,
+and the empty/invalid/fixed API-key sequence); items 39-42 cover the
+configurable Gemini model and the model-naming 429 toast; items 31-38 are the two-tier
+pipeline and romanized-text cases added for this task, taken verbatim from
+the two-tier plan's own manual checklist (`docs/superpowers/plans/2026-08-05-two-tier-translation.md`),
+renumbered to continue this table's existing sequence rather than colliding
+with rows 10-14 already in use here.

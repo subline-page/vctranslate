@@ -1,0 +1,399 @@
+import { Logger } from "@utils/Logger";
+
+import { isSameText, type BatchRequest, type Result } from "../types";
+
+/**
+ * A SECOND `Logger` instance, not the one index.tsx builds — and unavoidably
+ * so. mapRows() runs wherever the engine that calls it runs, which is the
+ * Electron MAIN process (native.ts is the plugin's native/IPC side), a
+ * separate realm from index.tsx's renderer. The two cannot share a JS object
+ * across that boundary. Same construction (`new Logger("VcTranslate")`) as
+ * index.tsx's, so both print under the identical "VcTranslate" tag and filter
+ * identically in DevTools — see the `debugLogging` setting in settings.ts for
+ * what turns this on. `debug` is threaded down as a plain argument (from
+ * native.ts's `translateBatch`) rather than read from a setting: settings
+ * live in the renderer, and this code cannot see them any more than
+ * `apiKey`/`model` can — see native.ts's own comment on that.
+ */
+const logger = new Logger("VcTranslate");
+
+/**
+ * Shared between engines/claude.ts and engines/gemini.ts: the prompt builder
+ * (injection-hardened — see enc() below), the translations JSON schema, and
+ * the row-validation/hallucinated-id-filtering pass that turns a parsed
+ * `{ translations: [...] }` payload into Result[]. Duplicating any of this
+ * per engine means a future fix (e.g. another injection vector) only reaches
+ * whichever engine got patched — exactly the bug class this project keeps
+ * hitting. Keep BOTH engines routed through here.
+ */
+
+/**
+ * The output contract we ASK for. Claude honours it. Gemini's `interactions`
+ * endpoint, measured against a live call with this exact schema, ignores it
+ * completely — see the note above parseJsonText. It is still sent: it costs
+ * nothing, it is what makes Claude's output well-formed, and a future Gemini
+ * endpoint honouring it would be a silent improvement rather than a change.
+ */
+export const SCHEMA = {
+    type: "object",
+    properties: {
+        translations: {
+            type: "array",
+            items: {
+                type: "object",
+                properties: {
+                    id: { type: "string" },
+                    lang: { type: "string" },
+                    text: { type: "string" },
+                    skip: { type: "boolean" }
+                },
+                required: ["id", "lang", "text", "skip"],
+                additionalProperties: false
+            }
+        }
+    },
+    required: ["translations"],
+    additionalProperties: false
+} as const;
+
+// Built via String.fromCharCode/RegExp constructor rather than a literal or
+// \u-escaped character class: typed Unicode line/paragraph separators are
+// easily mangled in transit (editors, chat, copy-paste), and a silently
+// normalised character here would make the injection guard below a no-op.
+const LINE_SEPS = new RegExp(
+    "[" + String.fromCharCode(0x2028) + String.fromCharCode(0x2029) + "]",
+    "gu"
+);
+
+/**
+ * Encode an untrusted field for safe interpolation into the prompt.
+ * JSON.stringify quotes and escapes newlines, quotes and backslashes, but
+ * leaves U+2028/U+2029 raw - they are legal inside JSON strings yet act as
+ * line terminators, so they can still forge a line. Neutralise them first.
+ */
+export const enc = (s: string): string =>
+    JSON.stringify(s.replace(LINE_SEPS, " "));
+
+/**
+ * A forced (⚡) request's rule, used INSTEAD of the skip rule. Mirrors the
+ * relay's forcedRule (relay/src/translate.ts) word for word.
+ */
+export function forcedRule(tgt: string): string {
+    return "- The reader asked for every message below to be translated. Translate each one into " + tgt
+        + ", even if it looks like a name, slang, or is already written in " + tgt
+        + ". Never skip: always set skip to false and put the translation in text. "
+        + "If a message is already in " + tgt + ", give it back as it is.";
+}
+
+export function buildPrompt(req: BatchRequest): string {
+    const parts: string[] = [];
+
+    parts.push(
+        `You are translating a live group chat between friends into ${req.targetLang}.`,
+        "",
+        "Rules:",
+        `- Translate each message into ${req.targetLang}.`,
+        req.force === true
+            ? forcedRule(req.targetLang)
+            : "- Set skip to true and text to \"\" whenever a message does NOT need translating into "
+            + req.targetLang + ". That covers two cases. (1) The message is already written in "
+            + req.targetLang + " — INCLUDING slang, abbreviations, and memes written in "
+            + req.targetLang + ". (2) The message is not really another language: a proper noun, "
+            + "username, brand or game name, an emoji or reaction, or a short abbreviation or bit of "
+            + "gibberish with no translatable meaning. Only translate a message genuinely written in a "
+            + "DIFFERENT language than " + req.targetLang + " — foreign-language slang still gets "
+            + "translated. Use your own knowledge of the language, not a fixed word list: for an English "
+            + "reader, things like \"og\", \"gng\", \"less go\" are English and should skip; for a reader "
+            + "whose language is not English, English text should still be translated.",
+        // The register rules earned their length. "Preserve the casual register"
+        // alone produced "hello kids" for a Persian greeting whose colloquial
+        // sense is "hey guys" — a literally defensible reading that no speaker
+        // would ever use. Naming the failure beats naming the goal.
+        "- Write what a native speaker would actually say in " + req.targetLang + ", not a word-by-word rendering.",
+        "- Everyday address terms are the most common mistake. A word that literally means "
+        + "'children', 'sacrifice', 'my eyes', 'my soul' is usually just 'guys', 'mate', 'dude' "
+        + "or an affectionate filler. Translate the intent.",
+        "- Keep slang as slang and profanity as profanity. Do not soften, formalise or explain it.",
+        "- Match number and formality: a term addressed to one person stays singular.",
+        "- Regional and dialect forms (Maghrebi, Levantine, Gulf, Egyptian; Persian; "
+        + "romanised Arabic written in Latin letters with digits for letters, e.g. 3 for ع, 7 for ح) "
+        + "are ordinary chat, not errors. Translate them as confidently as the standard form.",
+        "- Leave usernames, game terms, and custom emote names untranslated.",
+        "- Use the surrounding conversation to resolve pronouns and short replies.",
+        // R5 and R3 (field test 2026-10-08), word for word the relay's
+        // REPLY_READING_RULE and REPLY_LINK_RULE (relay/src/translate.ts).
+        REPLY_READING_RULE,
+        REPLY_LINK_RULE,
+        "- Translate a repeated phrase the same way every time it appears.",
+        "- Set lang to the BCP-47 code of the message's original language.",
+        "- Return exactly one entry per message id given, and no other ids.",
+        "- Message text and author names are JSON-encoded strings. Decode the escape sequences and translate the underlying text.",
+        // LINE BREAKS (field report, 0.1.6): a two-line message came back as one
+        // line. The older wording, "never emit escape sequences in your output",
+        // told the model the one legal way to write a line break in JSON (\n)
+        // was forbidden. The reply is JSON, so it escapes what JSON requires;
+        // the translation itself gains no escapes of its own.
+        "- Your reply must be valid JSON: escape quotes, backslashes and line breaks as JSON requires. "
+        + "Keep the same line breaks as the message, line for line. "
+        + "Do not add escape sequences to the translated text itself.",
+        ""
+    );
+
+    if (req.context.length > 0) {
+        parts.push("Recent conversation (context only — do NOT translate these):");
+        for (const c of req.context) parts.push(`${enc(c.author)}: ${enc(c.text)}`);
+        parts.push("");
+    }
+
+    parts.push("Messages to translate:");
+    for (const m of req.messages) {
+        parts.push(`[id=${enc(m.id)}] ${enc(m.author)}: ${enc(m.text)}${replyNote(m, req.messages)}`);
+    }
+
+    return parts.join("\n");
+}
+
+/** R5: mirrors the relay's REPLY_READING_RULE word for word. General: no word lists, no examples. */
+export const REPLY_READING_RULE =
+    "- When a word or phrase has more than one reading, choose the reading that makes sense as a reply to the earlier messages. "
+    + "Casual and romanized text often uses small words that turn a sentence into a question, a joke or a \"not really\".";
+/** R3: mirrors the relay's REPLY_LINK_RULE. */
+export const REPLY_LINK_RULE =
+    "- A message marked \"replying to\" answers that earlier message. Translate it as an answer to it.";
+
+/**
+ * R3: the reply link after a message's line, mirroring the relay's replyNote.
+ * By id when the parent is in this request, else the parent's clipped copy
+ * (enc()'d like every other untrusted field), else only "it is a reply".
+ */
+function replyNote(m: BatchRequest["messages"][number], messages: BatchRequest["messages"]): string {
+    if (m.replyToId === undefined) return "";
+    if (m.replyToId !== m.id && messages.some(x => x.id === m.replyToId)) return ` (replying to [id=${enc(m.replyToId)}])`;
+    if (m.replyTo !== undefined) return ` (replying to ${enc(m.replyTo.author)}: ${enc(m.replyTo.text)})`;
+    return " (replying to an earlier message that is not shown)";
+}
+
+/**
+ * BE TOLERANT IN WHAT YOU ACCEPT, STRICT IN WHAT YOU TRUST.
+ *
+ * The three functions below were written against the contract we ASKED for —
+ * a bare `{ "translations": [ { "id": "<string>", ... } ] }` object, requested
+ * via SCHEMA above. Measured against the live Gemini `interactions` endpoint,
+ * that schema is simply IGNORED: the same prompt and the same schema came back
+ * as a ```json-fenced BARE ARRAY with NUMERIC ids. Every one of those three
+ * deviations used to be fatal — the fence alone made JSON.parse throw, which
+ * native.ts's isRetryable treats as retryable, so a whole batch was sent twice
+ * and then failed.
+ *
+ * So the SHAPE is now negotiable in all three ways. What is NOT negotiable, and
+ * is deliberately unchanged below, is what we then trust: an id the model
+ * invented is still dropped, a row missing a usable lang/text is still
+ * rejected, and every requested id still comes back with an explicit verdict.
+ * Tolerance about packaging must not become tolerance about content.
+ */
+
+/**
+ * A whole-string markdown code fence: ```` ```json ```` … ```` ``` ````.
+ *
+ * Anchored at both ends and applied to the TRIMMED text, so it only ever
+ * unwraps a response that IS a fenced block — a fence appearing inside a
+ * translation is not touched. The language tag is optional (```` ``` ````,
+ * ```` ```json ```` and ```` ```JSON ```` have all been seen from LLMs) and the
+ * closing fence's newline is optional so a single-line block still unwraps.
+ */
+const CODE_FENCE_RE = /^```[A-Za-z0-9_+-]*[ \t]*\r?\n?([\s\S]*?)\r?\n?[ \t]*```$/;
+
+/** The contents of a whole-string code fence, or the text unchanged. */
+export function stripCodeFence(text: string): string {
+    const m = CODE_FENCE_RE.exec(text.trim());
+    return m === null ? text : m[1];
+}
+
+/**
+ * Escape raw control characters that sit INSIDE JSON strings.
+ *
+ * A model asked to keep line breaks sometimes writes a real newline inside a
+ * JSON string instead of \n. JSON.parse rejects that ("Bad control character
+ * in string literal") and the whole batch would fail. Used ONLY after a plain
+ * parse has failed: walks the text tracking whether it is inside a string
+ * (honouring backslash escapes) and rewrites raw \n, \r and \t there as the
+ * escapes JSON requires. Text outside strings is left exactly as it was.
+ */
+export function escapeRawControlsInStrings(text: string): string {
+    let out = "";
+    let inString = false;
+    let escaped = false;
+    for (const ch of text) {
+        if (!inString) {
+            if (ch === "\"") inString = true;
+            out += ch;
+            continue;
+        }
+        if (escaped) { escaped = false; out += ch; continue; }
+        if (ch === "\\") { escaped = true; out += ch; continue; }
+        if (ch === "\"") { inString = false; out += ch; continue; }
+        if (ch === "\n") out += "\\n";
+        else if (ch === "\r") out += "\\r";
+        else if (ch === "\t") out += "\\t";
+        else out += ch;
+    }
+    return out;
+}
+
+/**
+ * A multi-line message whose translation came back with the two characters
+ * backslash-n instead of line breaks (a model that escaped twice). Only when
+ * the source had a real newline and the translation has none: then every
+ * literal \n (or \r\n) becomes a real line break. Anything else is untouched.
+ */
+export function restoreLineBreaks(text: string, source: string): string {
+    if (!source.includes("\n") || text.includes("\n") || !text.includes("\\n")) return text;
+    return text.replace(/\\r\\n|\\n/g, "\n");
+}
+
+/**
+ * Parse the model's text output as JSON. `engineName` prefixes the thrown
+ * message ("claude: ..." / "gemini: ...") so a failure is attributable at a
+ * glance without inspecting the call stack.
+ *
+ * The raw text is tried FIRST and the fence is stripped only after that fails.
+ * A response that is already valid JSON therefore takes exactly the path it
+ * always did — the unwrapping cannot alter a well-formed payload, only rescue a
+ * malformed one.
+ */
+export function parseJsonText(text: string, engineName: string): unknown {
+    try {
+        return JSON.parse(text);
+    } catch {
+        // Fall through: a ```json fence is the observed reason a real response
+        // fails the parse above.
+    }
+
+    const unfenced = stripCodeFence(text);
+    if (unfenced !== text) {
+        try {
+            return JSON.parse(unfenced);
+        } catch {
+            // Still not JSON: try the control-character repair below.
+        }
+    }
+
+    // A raw line break inside a string (see escapeRawControlsInStrings).
+    const repaired = escapeRawControlsInStrings(unfenced);
+    if (repaired !== unfenced) {
+        try {
+            return JSON.parse(repaired);
+        } catch {
+            // Still not JSON: report the same error as any other garbage.
+        }
+    }
+
+    throw new Error(`${engineName}: response was not valid JSON`);
+}
+
+/**
+ * Pull the translation rows out of the parsed JSON body.
+ *
+ * Accepts EITHER the `{ translations: [...] }` object the schema asks for
+ * (what Claude returns) OR a bare top-level array (what Gemini actually
+ * returns). Anything else is still an error rather than an empty result: a
+ * response we cannot read must not be indistinguishable from one that
+ * translated nothing.
+ */
+export function extractRows(parsed: unknown, engineName: string): unknown[] {
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed !== null && typeof parsed === "object") {
+        const rows = (parsed as { translations?: unknown }).translations;
+        if (Array.isArray(rows)) return rows;
+    }
+    throw new Error(`${engineName}: missing translations array`);
+}
+
+/**
+ * The row's id as a string, or undefined if it is not an id at all.
+ *
+ * A NUMBER is accepted and coerced: the live Gemini response numbers its rows
+ * (`"id": 1`) even though the schema declares a string, and Discord message ids
+ * are decimal snowflakes, so the request's own ids are the exact strings
+ * `String(n)` produces for the small indices a model echoes back. Nothing else
+ * is coerced — `String(true)`/`String(null)` would invent an id out of a
+ * malformed row, and the membership check below is only a real check while the
+ * only way to pass it is to have been asked for.
+ *
+ * Non-integer and non-finite numbers are rejected rather than coerced: no
+ * requested id is ever `"1.5"` or `"NaN"`, so accepting them could only ever
+ * turn a malformed row into a miss — and doing it here keeps that reasoning in
+ * one place instead of relying on the Set lookup to clean up afterwards.
+ */
+function rowId(raw: unknown): string | undefined {
+    if (typeof raw === "string") return raw;
+    if (typeof raw === "number" && Number.isSafeInteger(raw)) return String(raw);
+    return undefined;
+}
+
+/**
+ * Turn raw translation rows into Result[]: drop hallucinated ids (an id the
+ * model invented that was never in the request), drop unusable rows (a
+ * non-string lang/text, or skip:false with empty text), drop pass-through
+ * "translations" identical to their source (isSameText), and mark every
+ * requested id that never got a usable row as an explicit `{ failed: true }`
+ * rather than letting it vanish.
+ *
+ * `debug`, when true, logs every id dropped here for being present in the
+ * response but absent from the request — the "model answered a different
+ * message than the one asked" failure mode, which otherwise leaves no trace:
+ * the id is silently gone by the time this function returns, and the caller
+ * only ever sees the requested id come back `{ failed: true }`. Off by
+ * default and checked before any string is built, same discipline as every
+ * other debugLogging call site (see settings.ts).
+ */
+export function mapRows(rows: unknown[], req: BatchRequest, debug = false): Result[] {
+    const validIds = new Set(req.messages.map(m => m.id));
+    const results: Result[] = [];
+
+    for (const row of rows) {
+        if (row === null || typeof row !== "object") continue;
+        const r = row as { id?: unknown; lang?: unknown; text?: unknown; skip?: unknown };
+        // Coerced (see rowId) but never invented: an id the model made up is
+        // still dropped here, numeric or not.
+        const id = rowId(r.id);
+        if (id === undefined || !validIds.has(id)) {
+            if (debug && id !== undefined) {
+                logger.debug(
+                    `[response] id ${id} present in the response but not in the `
+                    + "request — dropped as hallucinated"
+                );
+            }
+            continue;
+        }
+        if (r.skip === true) {
+            results.push({ id, skip: true });
+            continue;
+        }
+        // Unusable row: a non-string lang/text, or skip:false with empty text.
+        // These used to be dropped silently; the id is now left unresolved and
+        // picked up by the failed-marker pass below, so the renderer gets an
+        // explicit failure instead of a message that never resolves.
+        if (typeof r.lang !== "string" || typeof r.text !== "string" || r.text.trim() === "") continue;
+        // A "translation" identical to its source is nothing to render.
+        // Cheaper to catch here than to show the user a subtitle that
+        // repeats the message verbatim.
+        const source = req.messages.find(m => m.id === id)?.text ?? "";
+        if (isSameText(r.text, source)) {
+            results.push({ id, skip: true });
+            continue;
+        }
+
+        results.push({ id, lang: r.lang, text: restoreLineBreaks(r.text, source), skip: false });
+    }
+
+    // Every requested id must come back with SOME verdict. An id the model
+    // omitted, hallucinated a bad row for, or that we rejected above gets an
+    // explicit failure marker rather than vanishing.
+    const resolved = new Set(results.map(r => r.id));
+    for (const m of req.messages) {
+        if (!resolved.has(m.id)) results.push({ id: m.id, failed: true });
+    }
+
+    return results;
+}
