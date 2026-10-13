@@ -1,8 +1,7 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
-import { LocaleStore, React, showToast } from "@webpack/common";
+import { LocaleStore, React } from "@webpack/common";
 
-import { copyToClipboard } from "@utils/clipboard";
 
 import { entitlementLevel, type Level, subscribeEntitlement } from "./entitlement";
 import { type LanguageSelectOption, targetLanguageOptions } from "./languages";
@@ -96,14 +95,9 @@ export function PlanCard() {
     if (code !== "") {
         rows.push(React.createElement("div", { key: "code", style: { ...muted, display: "flex", gap: 8, alignItems: "center", marginTop: 4 } },
             SETTINGS_COPY.plan.codeLabel, " ",
-            React.createElement("code", { style: { userSelect: "all" } }, code), " ",
-            React.createElement("button", {
-                type: "button",
-                "data-subline-copy": "",
-                onClick: () => {
-                    void copyToClipboard(code).then(() => showToast(SETTINGS_COPY.plan.copied, "success")).catch(() => { });
-                }
-            }, SETTINGS_COPY.plan.copy)
+            // No Copy button (owner, 2026-10-13): its "Copied" toast is drawn
+            // under Settings, so a press looked like nothing happened.
+            React.createElement("code", { style: { userSelect: "all" } }, code)
         ));
     }
     const actions: any[] = [];
