@@ -91,6 +91,11 @@ let fastBatcher: Batcher | null = null;
 let qualityBatcher: Batcher | null = null;
 // Watches for a Subline update staged on disk but not yet loaded (updateNotice.ts).
 let updateWatch: UpdateWatch | null = null;
+/** helperKick.ts: first ask a minute after start, then every 5 minutes while Discord is open. */
+const ASK_FOR_UPDATE_FIRST_MS = 60_000;
+const ASK_FOR_UPDATE_EVERY_MS = 5 * 60_000;
+let updateAskStart: ReturnType<typeof setTimeout> | null = null;
+let updateAskTimer: ReturnType<typeof setInterval> | null = null;
 /** Did Subline's patches apply in this Discord? Checked once per session (patchHealth.ts). */
 let patchHealthWatch: PatchHealthWatch | null = null;
 
@@ -5350,6 +5355,20 @@ export default definePlugin({
             clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>)
         });
         updateWatch.start();
+        // ASK FOR A NEW BUILD (helperKick.ts): the helper's own feed check can
+        // be hours away, and the feed never replaces the helper. First ask a
+        // minute after start (never in Discord's busy first seconds).
+        const askForUpdate = () => {
+            try {
+                void Promise.resolve(Native.askHelperForUpdate?.(BUILD_ID, PLUGIN_VERSION)).then(result => {
+                    if (result === "kick") logger.info("a newer Subline build is out; asked the background helper to install it now");
+                }).catch(() => { });
+            } catch {
+                // Never a reason for anything else to fail; the next ask is minutes away.
+            }
+        };
+        updateAskStart = setTimeout(askForUpdate, ASK_FOR_UPDATE_FIRST_MS);
+        updateAskTimer = setInterval(askForUpdate, ASK_FOR_UPDATE_EVERY_MS);
 
         // Did Subline's patches apply in this Discord? Nothing runs now: the
         // check waits for messages (or ten minutes), then reports at most once
@@ -5492,6 +5511,10 @@ export default definePlugin({
         // fire into a torn-down module (same reasoning as the timers below).
         updateWatch?.stop();
         updateWatch = null;
+        if (updateAskStart !== null) clearTimeout(updateAskStart);
+        if (updateAskTimer !== null) clearInterval(updateAskTimer);
+        updateAskStart = null;
+        updateAskTimer = null;
         patchHealthWatch?.stop();
         patchHealthWatch = null;
         onSettingsChanged(null);

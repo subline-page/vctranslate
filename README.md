@@ -2,7 +2,7 @@
 
 This is the complete corresponding source for the translation plugin inside [Subline](https://subline.page), released under the GPL-3.0-or-later (see `LICENSE`).
 
-Each tag matches one Subline release. The tag `v0.2.6` is the source of Subline 0.2.6, build id `f4a393c764289a59`.
+Each tag matches one Subline release. The tag `v0.2.7` is the source of Subline 0.2.7, build id `4bf52aead2cf3a39`.
 
 ## What is here
 

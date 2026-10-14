@@ -38,7 +38,7 @@ export const UPGRADE_COPY = {
     codeSubmit: "Activate",
     codeEmpty: "Type or paste a code first.",
     codeClaimed: "This code has been fully claimed.",
-    codeNotFound: "That code doesn't exist.",
+    codeNotFound: "That code doesn't exist. Check it against your receipt email. If it still does not work, write to support@subline.page.",
     codeAlready: "Already yours.",
     codeUnreachable: "Can't reach Subline right now. Try again in a minute.",
     codeRateLimited: "Too many codes tried from this network today. Try again after midnight UTC.",

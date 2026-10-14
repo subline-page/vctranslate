@@ -15,12 +15,12 @@
  */
 
 /**
- * How often the running plugin re-checks the disk. The helper itself only looks
- * for a release every 6 hours, and an update that lands mid-session is exactly
- * the case that stranded the maker, so a check every 15 minutes catches it well
- * within a sitting while costing one tiny JSON read. It is NOT on any hot path.
+ * How often the running plugin re-checks the disk. Every minute (2026-10-13):
+ * the plugin now asks the helper for a new build every 5 minutes
+ * (helperKick.ts), so the bar should follow the install within a minute, not
+ * 15. One tiny local JSON read; NOT on any hot path.
  */
-export const UPDATE_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+export const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 
 /**
  * Should we prompt for a restart, given what is running and what is staged?

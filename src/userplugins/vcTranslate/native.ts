@@ -9,7 +9,9 @@ import { type FeedbackPostResult, fetchRelayCheckout, fetchRelayRedeem, fetchRel
 import { HttpError } from "./httpError";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
+import { askHelperForUpdate as askHelper, type AskResult } from "./helperKick";
 import { readStagedBuildIdSync } from "./stagedBuild";
+import { isBuildId } from "./statusShape";
 import { type LaunchApp, noteLaunchWhenPrimary, writeStatusBeacon } from "./statusFile";
 import type { BatchRequest, EngineId, Result } from "./types";
 
@@ -460,6 +462,23 @@ export async function reportStatus(_: IpcMainInvokeEvent, json: string): Promise
  */
 export async function readStagedBuildId(_: IpcMainInvokeEvent): Promise<string | null> {
     return readStagedBuildIdSync();
+}
+
+/**
+ * Ask the background helper for a newer build now, when the release feed has
+ * one (helperKick.ts). The renderer calls this every few minutes; the answer
+ * is for its log only. Never throws.
+ */
+export async function askHelperForUpdate(_: IpcMainInvokeEvent, buildId: unknown, pluginVersion: unknown): Promise<AskResult> {
+    // The renderer says which build it is: the main process states no
+    // identity of its own (the build stamp lives in renderer.js only).
+    if (typeof buildId !== "string" || !isBuildId(buildId)) return "unreachable";
+    if (typeof pluginVersion !== "string" || !/^\d+(\.\d+)*$/.test(pluginVersion)) return "unreachable";
+    try {
+        return await askHelper({ buildId, pluginVersion }, () => readStagedBuildIdSync());
+    } catch {
+        return "unreachable";
+    }
 }
 
 /**
