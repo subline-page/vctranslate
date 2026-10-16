@@ -4,23 +4,57 @@
  * Built on the modal Vencord itself uses (`Modal` + `openModal` from
  * @webpack/common, as in Vencord's own badges plugin at the pinned commit), so
  * no Discord patch is involved. The buttons are the modal's own `actions`.
- * If a modal cannot be shown at all, the pricing page opens instead.
+ * If a modal cannot be shown at all, the pricing page opens instead. Every
+ * panel renders inside an ErrorBoundary (guardedOpen): a panel that throws
+ * closes, and Discord keeps running.
  *
  * The code field is a plain <input>: its value is read from the closure when
  * Activate is pressed, so the modal needs no React state of its own, and a
  * refusal is said in a toast while the modal stays open for another try.
  */
-import { closeModal, Modal, openModal, React, showToast } from "@webpack/common";
+import { closeModal, Modal, React } from "@webpack/common";
 
 import type { Plan } from "./checkout";
 import { PRICING_URL } from "./freePlan";
-import { UPGRADE_COPY } from "./upgradeCopy";
+import { openGuardedModal } from "./linkPanels";
+import { toast } from "./toast";
+import { ELSEWHERE_COPY, UPGRADE_COPY } from "./upgradeCopy";
 
 const ROW = { display: "flex", justifyContent: "space-between", padding: "8px 0", color: "var(--text-default, var(--text-normal))" };
 const MUTED = { color: "var(--text-muted)", fontSize: "0.9rem" };
 
 function openPricingInstead(): void {
     (globalThis as any).VencordNative?.native?.openExternal?.(PRICING_URL);
+}
+
+/**
+ * openModal inside an ErrorBoundary (linkPanels.tsx openGuardedModal): a panel
+ * that throws while it renders closes, and never reaches Discord's own
+ * top-level boundary. Throws when the modal cannot be opened at all, so the
+ * caller's fallback (the pricing page) still runs.
+ */
+function guardedOpen(render: (props: any) => any): string {
+    const key = openGuardedModal(render);
+    if (key === null) throw new Error("Subline: the window could not be opened");
+    return key;
+}
+
+const LINK_STYLE = { cursor: "pointer", color: "var(--text-link, #00a8fc)" } as const;
+
+/**
+ * "Pay on another device" (0.2.8): a small link under a buy panel's text, for
+ * a computer whose network blocks the payment page. It closes the panel and
+ * hands over to `go` (the account confirm, then the link and its QR code).
+ */
+function ElsewhereLink({ go }: { go?: () => void; }) {
+    if (go === undefined) return null;
+    return (
+        <div style={{ ...MUTED, paddingTop: 8 }}>
+            <a role="button" tabIndex={0} style={LINK_STYLE} data-subline-elsewhere="" onClick={(e: any) => { e?.preventDefault?.(); go(); }}>
+                {ELSEWHERE_COPY.link}
+            </a>
+        </div>
+    );
 }
 
 /* ------------------------------------------------------ open panels -- */
@@ -57,19 +91,23 @@ export function closePanel(kind: PanelKind): boolean {
 
 /* ------------------------------------------------------------ Add AI -- */
 
-/** P3: the prices are on the buttons; the body is the coupon line alone. */
-export function UpgradePanelBody() {
+/** P3: the prices are on the buttons; the body is the coupon line, and "Pay on another device". */
+export function UpgradePanelBody({ elsewhere }: { elsewhere?: () => void; } = {}) {
     return (
         <div>
             <div style={MUTED}>{UPGRADE_COPY.couponHint}</div>
+            <ElsewhereLink go={elsewhere} />
         </div>
     );
 }
 
-/** The Add AI panel, for an Automatic owner. `choose` runs after the panel closes. */
-export function openUpgradePanel(choose: (plan: Plan) => void): void {
+/**
+ * The Add AI panel, for an Automatic owner. `choose` runs after the panel
+ * closes; `elsewhere` is "Pay on another device".
+ */
+export function openUpgradePanel(choose: (plan: Plan) => void, elsewhere?: () => void): void {
     try {
-        track("addAi", forget => openModal((props: any) => (
+        track("addAi", forget => guardedOpen((props: any) => (
             <Modal
                 {...props}
                 title={UPGRADE_COPY.panelTitle}
@@ -79,7 +117,7 @@ export function openUpgradePanel(choose: (plan: Plan) => void): void {
                     { text: UPGRADE_COPY.annualButton, variant: "primary", onClick: () => { forget(); props.onClose(); choose("annual"); } }
                 ]}
             >
-                <UpgradePanelBody />
+                <UpgradePanelBody elsewhere={elsewhere && (() => { forget(); props.onClose(); elsewhere(); })} />
             </Modal>
         )));
     } catch {
@@ -93,7 +131,7 @@ export function openUpgradePanel(choose: (plan: Plan) => void): void {
  */
 export function openPaymentPendingPanel(): void {
     try {
-        track("pending", forget => openModal((props: any) => (
+        track("pending", forget => guardedOpen((props: any) => (
             <Modal
                 {...props}
                 title={UPGRADE_COPY.paymentPending}
@@ -110,7 +148,7 @@ export function openPaymentPendingPanel(): void {
 
 /* ---------------------------------------------------------- Activate -- */
 
-export function ActivatePanelBody() {
+export function ActivatePanelBody({ elsewhere }: { elsewhere?: () => void; } = {}) {
     return (
         <div>
             <div style={ROW}>
@@ -119,14 +157,18 @@ export function ActivatePanelBody() {
             </div>
             <div style={MUTED}>{UPGRADE_COPY.automaticNote}</div>
             <div style={{ ...MUTED, paddingTop: 8 }}>{UPGRADE_COPY.panelFootnote}</div>
+            <ElsewhereLink go={elsewhere} />
         </div>
     );
 }
 
-/** The Activate panel, for an install with nothing: buy Automatic, or enter a code. */
-export function openActivatePanel(actions: { buy: () => void; enterCode: () => void; }): void {
+/**
+ * The Activate panel, for an install with nothing: buy Automatic, or enter a
+ * code; `elsewhere` is "Pay on another device".
+ */
+export function openActivatePanel(actions: { buy: () => void; enterCode: () => void; elsewhere?: () => void; }): void {
     try {
-        track("activate", forget => openModal((props: any) => (
+        track("activate", forget => guardedOpen((props: any) => (
             <Modal
                 {...props}
                 title={UPGRADE_COPY.activateTitle}
@@ -136,7 +178,7 @@ export function openActivatePanel(actions: { buy: () => void; enterCode: () => v
                     { text: UPGRADE_COPY.automaticButton, variant: "primary", onClick: () => { forget(); props.onClose(); actions.buy(); } }
                 ]}
             >
-                <ActivatePanelBody />
+                <ActivatePanelBody elsewhere={actions.elsewhere && (() => { forget(); props.onClose(); actions.elsewhere!(); })} />
             </Modal>
         )));
     } catch {
@@ -159,40 +201,13 @@ const INPUT_STYLE = {
 } as const;
 
 /**
- * What submitting a code can lead to: null (it worked, the modal closes), the
- * sentence to show (a toast; the modal stays open), or a code that checked
- * out and waits for the reader to confirm it on this computer (`confirm`
- * links it, and resolves like `submit` does).
+ * What submitting a code leads to: null (it worked, the modal closes), or the
+ * sentence to show (a toast; the modal stays open for another try). 0.2.8:
+ * the account it joins is confirmed before the entry opens (the account
+ * confirm), so a code that checks out is linked at once, with no "Use this
+ * code?" after it.
  */
-export type CodeSubmitResult = string | null | { confirm: () => Promise<string | null> };
-
-/** "Use this code?" / "It works on up to 3 computers." with a "Use it" button. */
-function openCodeConfirm(confirm: () => Promise<string | null>): void {
-    let busy = false;
-    try {
-        openModal((props: any) => (
-            <Modal
-                {...props}
-                title={UPGRADE_COPY.codeConfirmTitle}
-                subtitle={UPGRADE_COPY.codeConfirm}
-                actions={[
-                    {
-                        text: UPGRADE_COPY.codeConfirmButton, variant: "primary", onClick: () => {
-                            if (busy) return;
-                            busy = true;
-                            void confirm().then(error => {
-                                if (error === null) props.onClose();
-                                else showToast(error, "failure");
-                            }).finally(() => { busy = false; });
-                        }
-                    }
-                ]}
-            />
-        ));
-    } catch {
-        openPricingInstead();
-    }
-}
+export type CodeSubmitResult = string | null;
 
 /**
  * The code entry. `submit` gets the typed text; see CodeSubmitResult.
@@ -203,18 +218,14 @@ export function openCodeEntry(submit: (text: string) => Promise<CodeSubmitResult
     let value = "";
     let busy = false;
     try {
-        openModal((props: any) => {
+        guardedOpen((props: any) => {
             const go = async () => {
                 if (busy) return;
                 busy = true;
                 try {
                     const result = await submit(value);
                     if (result === null) props.onClose();
-                    else if (typeof result === "string") showToast(result, "failure");
-                    else {
-                        props.onClose();
-                        openCodeConfirm(result.confirm);
-                    }
+                    else toast(result, "failure");
                 } finally {
                     busy = false;
                 }

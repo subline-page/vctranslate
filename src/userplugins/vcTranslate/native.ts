@@ -1,11 +1,14 @@
 import type { IpcMainInvokeEvent } from "electron";
 
-import { type AppSignals, readAppSignalsSync } from "./appSignals";
+import { type AppSignals, cachedAppVersionReader, readAppSignalsSync } from "./appSignals";
 import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
 import { translateWithGemini } from "./engines/gemini";
 import { translateWithGoogle } from "./engines/google";
 import { translateWithGroq } from "./engines/groq";
-import { type FeedbackPostResult, fetchRelayCheckout, fetchRelayRedeem, fetchRelayStatus, postFeedback, postPatchHealth, type StatusOptions, translateWithRelayDetailed } from "./engines/relay";
+import {
+    type FeedbackPostResult, fetchRelayChannels, fetchRelayCheckout, fetchRelayLink, fetchRelayLinkPoll, fetchRelayMoveFinish, fetchRelayMoveStart, fetchRelayPrefs, fetchRelayRedeem, fetchRelayStatus,
+    MOVE_TICKET_RE, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed
+} from "./engines/relay";
 import { HttpError } from "./httpError";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
@@ -25,8 +28,15 @@ import type { BatchRequest, EngineId, Result } from "./types";
  * Electron's main process (never in a test or any other Node process), never
  * throws, never delays startup, and NOT an export: every export of this file
  * becomes an IPC handler.
+ *
+ * 0.2.8: the same place names the desktop app on every relay request
+ * (`x-subline-app`, engines/relay.ts), from app-version.json. Only here:
+ * a test or the browser add-on's background (which names itself) never reads
+ * Subline's folder for it. Setting it reads nothing; the first relay request
+ * does, at most once every 10 minutes after that.
  */
 if (typeof process !== "undefined" && process.versions?.electron !== undefined && (process as { type?: string }).type === "browser") {
+    setRelayAppSource(cachedAppVersionReader());
     try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         noteLaunchWhenPrimary((require("electron") as { app: LaunchApp }).app);
@@ -323,8 +333,35 @@ export type RelayStatusResponse =
         automatic?: boolean; ai?: boolean; aiUntil?: number; code?: string;
         previews?: { used: number; cap: number }; token?: string; tokenExpiresAt?: number;
         deadCode?: string; grant?: "early"; check?: { valid: boolean; automatic: boolean; ai: boolean };
+        /* API 3: whether this install's account is linked to a Discord account (absent: not stated). */
+        linked?: boolean;
+        /* A link answer only: the saved code was left out, and why. */
+        codeRefused?: "code_on_other_account" | "code_in_use";
+        /* A link answer only: that code is one this account moved away itself (Move my plan). */
+        codeMoved?: boolean;
+        /* API 3, not linked: a prior payer, whose plan keeps working until it links (the Link bar). */
+        mustLink?: boolean;
+        /* API 3, not linked: a purchase was started on this install (0.2.7); a link asks the account confirm first. */
+        pendingPurchase?: boolean;
+        /* A Move my plan answer: the plan moved into this account. */
+        moved?: boolean;
+        /* The owner's off switch (absent: not stated, keep the last list). */
+        off?: string[];
     }
-    | { ok: false; error: string; errorCode?: string; status?: number };
+    | RelayRefusal;
+
+/**
+ * A failed relay call. `status` is the relay's HTTP status when it answered;
+ * `until` (YYYY-MM-DD) comes with move_too_soon, `triesLeft` with pair_wrong,
+ * and `moved` with a key this account moved away itself.
+ */
+export type RelayRefusal = { ok: false; error: string; errorCode?: string; status?: number; until?: string; triesLeft?: number; moved?: true; };
+
+/** One poll of the browser fallback: still waiting, the pairing code is needed, or the link answer. */
+export type RelayLinkPollResponse = { ok: true; waiting: "pending" | "pair_needed"; } | RelayStatusResponse;
+
+/** The move ticket from /v1/move/start, or why not. */
+export type RelayMoveStartResponse = { ok: true; ticket: string; expiresAt: number; } | RelayRefusal;
 
 /**
  * `status` is the relay's HTTP status when it answered at all. Absent means
@@ -335,13 +372,18 @@ export type RelayCheckoutResponse = { ok: true; url: string } | { ok: false; err
 
 export type RelayRedeemResponse = { ok: true; code: string } | { ok: false; error: string; errorCode?: string; status?: number };
 
-/** The relay's error word and HTTP status off a thrown HttpError, if it had them. */
-function errorCodeOf(err: unknown): { errorCode?: string; status?: number } {
+/** The relay's error word, HTTP status and 0.2.8 details off a thrown HttpError, if it had them. */
+function errorCodeOf(err: unknown): { errorCode?: string; status?: number; until?: string; triesLeft?: number; moved?: true } {
     const c = (err as { errorCode?: unknown })?.errorCode;
     const s = err instanceof HttpError ? err.status : undefined;
+    const until = (err as { until?: unknown })?.until;
+    const triesLeft = (err as { triesLeft?: unknown })?.triesLeft;
     return {
         ...(typeof c === "string" ? { errorCode: c } : {}),
-        ...(typeof s === "number" && s > 0 ? { status: s } : {})
+        ...(typeof s === "number" && s > 0 ? { status: s } : {}),
+        ...(typeof until === "string" ? { until } : {}),
+        ...(typeof triesLeft === "number" ? { triesLeft } : {}),
+        ...((err as { moved?: unknown })?.moved === true ? { moved: true as const } : {})
     };
 }
 
@@ -408,25 +450,161 @@ export async function relayStatus(
             prior: options?.prior === true,
             check: options?.check === true
         });
-        const out: RelayStatusResponse = { ok: true, plan: status.plan, used: status.used, cap: status.cap };
-        if (status.serverNow !== undefined) out.serverNow = status.serverNow;
-        if (status.purchase !== undefined) out.purchase = status.purchase;
-        if (status.automatic !== undefined) {
-            out.automatic = status.automatic;
-            out.ai = status.ai === true;
-            if (status.aiUntil !== undefined) out.aiUntil = status.aiUntil;
-            if (status.code !== undefined) out.code = status.code;
-            if (status.previews !== undefined) out.previews = status.previews;
-            if (status.token !== undefined) out.token = status.token;
-            if (status.tokenExpiresAt !== undefined) out.tokenExpiresAt = status.tokenExpiresAt;
-            if (status.deadCode !== undefined) out.deadCode = status.deadCode;
-            if (status.grant !== undefined) out.grant = status.grant;
-            if (status.check !== undefined) out.check = status.check;
-        }
-        return out;
+        return statusResponseFrom(status);
     } catch (err) {
         const raw = err instanceof Error ? err.message : "unknown error";
         return { ok: false, error: scrubKey(install ? scrubKey(raw, install) : raw, code), ...errorCodeOf(err) };
+    }
+}
+
+/** A parsed status answer as it crosses IPC: only the fields the relay stated. */
+function statusResponseFrom(status: RelayStatus): RelayStatusResponse {
+    const out: RelayStatusResponse = { ok: true, plan: status.plan, used: status.used, cap: status.cap };
+    if (status.serverNow !== undefined) out.serverNow = status.serverNow;
+    if (status.purchase !== undefined) out.purchase = status.purchase;
+    if (status.automatic !== undefined) {
+        out.automatic = status.automatic;
+        out.ai = status.ai === true;
+        if (status.aiUntil !== undefined) out.aiUntil = status.aiUntil;
+        if (status.code !== undefined) out.code = status.code;
+        if (status.previews !== undefined) out.previews = status.previews;
+        if (status.token !== undefined) out.token = status.token;
+        if (status.tokenExpiresAt !== undefined) out.tokenExpiresAt = status.tokenExpiresAt;
+        if (status.deadCode !== undefined) out.deadCode = status.deadCode;
+        if (status.grant !== undefined) out.grant = status.grant;
+        if (status.check !== undefined) out.check = status.check;
+        if (status.linked !== undefined) out.linked = status.linked;
+        if (status.codeRefused !== undefined) out.codeRefused = status.codeRefused;
+        if (status.codeMoved === true) out.codeMoved = true;
+        if (status.mustLink === true) out.mustLink = true;
+        if (status.pendingPurchase === true) out.pendingPurchase = true;
+        if (status.moved === true) out.moved = true;
+    }
+    if (status.off !== undefined) out.off = [...status.off];
+    return out;
+}
+
+/** The longest OAuth code accepted for /v1/link. Discord's are about 30 characters. */
+const LINK_CODE_MAX = 512;
+/** A Discord account id (a snowflake): what `expect` must be. The relay refuses anything else. */
+const SNOWFLAKE_RE = /^[1-9][0-9]{16,19}$/;
+/** The browser fallback's state, as the relay accepts it. */
+const LINK_STATE_RE = /^[A-Za-z0-9_-]{32,128}$/;
+/** The pairing code the browser page shows: 6 digits (spaces typed with it are dropped). */
+const PAIR_RE = /^[0-9]{6}$/;
+
+const isString = (v: unknown): v is string => typeof v === "string";
+
+/** `raw` with every secret in `secrets` replaced (credential, install, code, account id, state, ticket). */
+function scrubAll(raw: string, secrets: unknown[]): string {
+    let out = raw;
+    for (const secret of secrets) if (typeof secret === "string") out = scrubKey(out, secret);
+    return out;
+}
+
+/** A thrown error as the renderer gets it: its word and details, every secret scrubbed. */
+function refusalFrom(err: unknown, secrets: unknown[]): RelayRefusal {
+    const raw = err instanceof Error ? err.message : "unknown error";
+    return { ok: false, error: scrubAll(raw, secrets), ...errorCodeOf(err) };
+}
+
+/**
+ * Link this install's account to the Discord account that authorized `code`
+ * (POST /v1/link, see link.ts). `expect` is the signed-in Discord account's id:
+ * the relay binds nothing unless Discord authorized that same account (0.2.8,
+ * EVERY BIND NAMES THE ACCOUNT). Here for the reason relayStatus is: the
+ * renderer does no network for the relay. The answer is a status answer, so
+ * the renderer takes it in exactly as it takes one. The Discord code, the
+ * account id, the credential and the install id are scrubbed out of any
+ * error. Never throws.
+ */
+export async function relayLink(
+    _: IpcMainInvokeEvent,
+    credential: string,
+    install: string,
+    code: string,
+    expect: string
+): Promise<RelayStatusResponse> {
+    if (!isString(credential) || !isString(install) || !isString(code) || code === "" || code.length > LINK_CODE_MAX
+        || !isString(expect) || !SNOWFLAKE_RE.test(expect)) {
+        return { ok: false, error: "bad link request" };
+    }
+    try {
+        return statusResponseFrom(await fetchRelayLink(credential, install, code, expect, fetch));
+    } catch (err) {
+        return refusalFrom(err, [code, expect, install, credential]);
+    }
+}
+
+/**
+ * One poll of the browser fallback (POST /v1/link/poll, linkFallback.ts):
+ * still waiting, the pairing code is needed, or the link answer (a status
+ * answer). `pair` is the code the browser page showed, as typed (spaces are
+ * dropped); `ticket` finishes a move instead of a plain link. Never throws.
+ */
+export async function relayLinkPoll(
+    _: IpcMainInvokeEvent,
+    credential: string,
+    install: string,
+    state: string,
+    expect: string,
+    pair?: string,
+    ticket?: string
+): Promise<RelayLinkPollResponse> {
+    const typed = isString(pair) ? pair.replace(/\s+/g, "") : undefined;
+    if (!isString(credential) || !isString(install) || !isString(state) || !LINK_STATE_RE.test(state)
+        || !isString(expect) || !SNOWFLAKE_RE.test(expect)
+        || (pair !== undefined && (typed === undefined || !PAIR_RE.test(typed)))
+        || (ticket !== undefined && (!isString(ticket) || !MOVE_TICKET_RE.test(ticket)))) {
+        return { ok: false, error: "bad poll request" };
+    }
+    try {
+        const out = await fetchRelayLinkPoll(credential, install, {
+            state, expect, ...(typed !== undefined ? { pair: typed } : {}), ...(ticket !== undefined ? { ticket } : {})
+        }, fetch);
+        if (out.kind !== "linked") return { ok: true, waiting: out.kind };
+        return statusResponseFrom(out.status);
+    } catch (err) {
+        return refusalFrom(err, [state, expect, ticket, install, credential]);
+    }
+}
+
+/**
+ * Move my plan, first step (POST /v1/move/start), from a linked computer of
+ * the account that holds the plan: a one-time ticket for the new account's
+ * Authorize. Never throws.
+ */
+export async function relayMoveStart(_: IpcMainInvokeEvent, credential: string, install: string): Promise<RelayMoveStartResponse> {
+    if (!isString(credential) || !isString(install)) return { ok: false, error: "bad move request" };
+    try {
+        const out = await fetchRelayMoveStart(credential, install, fetch);
+        return { ok: true, ticket: out.ticket, expiresAt: out.expiresAt };
+    } catch (err) {
+        return refusalFrom(err, [install, credential]);
+    }
+}
+
+/**
+ * Move my plan, last step (POST /v1/move/finish), from the new account after
+ * its Authorize: the ticket, Discord's code and the signed-in account's id.
+ * The answer is a status answer (plus `moved`). Never throws.
+ */
+export async function relayMoveFinish(
+    _: IpcMainInvokeEvent,
+    credential: string,
+    install: string,
+    ticket: string,
+    code: string,
+    expect: string
+): Promise<RelayStatusResponse> {
+    if (!isString(credential) || !isString(install) || !isString(ticket) || !MOVE_TICKET_RE.test(ticket)
+        || !isString(code) || code === "" || code.length > LINK_CODE_MAX || !isString(expect) || !SNOWFLAKE_RE.test(expect)) {
+        return { ok: false, error: "bad move request" };
+    }
+    try {
+        return statusResponseFrom(await fetchRelayMoveFinish(credential, install, ticket, code, expect, fetch));
+    } catch (err) {
+        return refusalFrom(err, [ticket, code, expect, install, credential]);
     }
 }
 
@@ -519,4 +697,31 @@ export async function relaySendFeedback(_: IpcMainInvokeEvent, install: string, 
  */
 export async function readAppSignals(_: IpcMainInvokeEvent): Promise<AppSignals> {
     return readAppSignalsSync();
+}
+
+/** The largest channels POST the renderer may send (the relay takes 8 KB). */
+const CHANNELS_MAX_JSON = 8_192;
+
+/**
+ * The 🌐 choices of a linked account (GET /v1/channels without `json`, POST
+ * with it). Here for the reason relayStatus is: the renderer does no network
+ * for the relay. Never throws.
+ */
+export async function relayChannels(_: IpcMainInvokeEvent, credential: string, install: string, json?: string): Promise<RelayChannelsResult> {
+    if (!isString(credential) || !isString(install)) return { ok: false, error: "rejected" };
+    if (json !== undefined && (typeof json !== "string" || new TextEncoder().encode(json).length > CHANNELS_MAX_JSON)) return { ok: false, error: "rejected" };
+    return fetchRelayChannels(credential, install, json, fetch);
+}
+
+/** The largest prefs POST the renderer may send (the relay takes 4 KB). */
+const PREFS_MAX_JSON = 4_096;
+
+/**
+ * The Subline settings of a linked account (GET /v1/prefs without `json`,
+ * POST with it). Same reason and same contract as relayChannels. Never throws.
+ */
+export async function relayPrefs(_: IpcMainInvokeEvent, credential: string, install: string, json?: string): Promise<RelayPrefsResult> {
+    if (!isString(credential) || !isString(install)) return { ok: false, error: "rejected" };
+    if (json !== undefined && (typeof json !== "string" || new TextEncoder().encode(json).length > PREFS_MAX_JSON)) return { ok: false, error: "rejected" };
+    return fetchRelayPrefs(credential, install, json, fetch);
 }

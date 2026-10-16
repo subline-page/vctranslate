@@ -16,7 +16,9 @@ const jsx = {
 export default defineConfig({
     test: {
         include: ["tests/**/*.test.ts"],
-        environment: "node"
+        environment: "node",
+        // Every test also checks that no toast went out in the wrong shape.
+        setupFiles: ["tests/toastGuard.setup.ts"]
     },
     // Vitest 4 transforms with oxc. On an older vitest (esbuild) this key is
     // ignored and JSX fails to resolve "react/jsx-runtime"; the equivalent
@@ -34,6 +36,7 @@ export default defineConfig({
             "@api/MessagePopover": stub("api-messagepopover.ts"),
             "@api/Notices": stub("api-notices.ts"),
             "@api/Settings": stub("api-settings.ts"),
+            "@components/ErrorBoundary": stub("components-errorboundary.ts"),
             "@utils/clipboard": stub("utils-clipboard.ts"),
             "@utils/Logger": stub("utils-logger.ts"),
             "@utils/native": stub("utils-native.ts"),

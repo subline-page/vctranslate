@@ -16,7 +16,7 @@
  *   - Writes are COALESCED behind `MIN_WRITE_INTERVAL_MS`. A 25-message batch
  *     lands 25 results in one tick and produces ONE write; a channel of live
  *     chat produces at most one write per interval, whatever the traffic.
- *   - Nothing here throws. `Native.reportStatus` is invoked inside try/catch
+ *   - Nothing here throws. `transport.reportStatus` is invoked inside try/catch
  *     and its promise is caught: an absent native half (an old build, a
  *     partially loaded plugin), a full disk, a revoked permission — all of them
  *     log once and are ignored. If the beacon breaks, translation continues
@@ -30,7 +30,6 @@
  */
 
 import { Logger } from "@utils/Logger";
-import type { PluginNative } from "@utils/types";
 
 import {
     BEACON_FORMAT, BUILD_ID, PLUGIN_VERSION, tierForEngine,
@@ -38,8 +37,8 @@ import {
 } from "./statusShape";
 import type { EngineId } from "./types";
 import { clearRecentErrors, noteRecentError } from "./recentErrors";
+import { isDesktop, transport } from "./transport";
 
-const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
 
 /**
@@ -113,9 +112,12 @@ function noteWriteFailure(reason: unknown): void {
 function flush(): void {
     lastWriteAt = Date.now();
     try {
+        // The beacon is a file beside the installed app. A browser has none:
+        // nothing to write, and nothing to warn about.
+        if (!isDesktop()) return;
         const beacon = snapshot();
         if (beacon === null) return;
-        const sent = Native.reportStatus(JSON.stringify(beacon));
+        const sent = transport.reportStatus(JSON.stringify(beacon));
         // `reportStatus` returns a promise across IPC. An unhandled rejection
         // from a fire-and-forget call would surface as a console error the user
         // can do nothing about.

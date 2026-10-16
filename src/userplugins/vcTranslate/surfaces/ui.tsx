@@ -2,7 +2,9 @@
  * How surface translations look.
  *
  * THE TRANSLATION IS ALWAYS VISIBLE. Nobody hovers, so nothing here is a
- * hover-only mark. Where there is room, a small line goes under the original.
+ * hover-only mark. (People's names are the one deliberate exception, decided
+ * for 0.2.8: a name translated in place would ruin reading. They live in
+ * namesUi.tsx.) Where there is room, a small line goes under the original.
  * Where there is not (list rows, titles, tags, the channel header, the reply
  * bar), the TRANSLATED text takes the original's place, prefixed "✦ ", with
  * the original one hover away in the tooltip. It inherits Discord's own
@@ -298,9 +300,16 @@ export function inPlaceFlipCount(): number {
 export function useSurfaceVersion(): number {
     const [version, bump] = React.useReducer((n: number) => n + 1, 0);
     React.useEffect(() => {
-        flipListeners.add(bump);
-        const off = service?.subscribe(bump);
-        return () => { flipListeners.delete(bump); off?.(); };
+        // Runs inside Discord's bubble: a throw here must not reach it.
+        let off: (() => void) | undefined;
+        try {
+            flipListeners.add(bump);
+            off = service?.subscribe(bump);
+        } catch { /* the version just stays put */ }
+        return () => {
+            flipListeners.delete(bump);
+            try { off?.(); } catch { /* already gone */ }
+        };
     }, []);
     return version;
 }

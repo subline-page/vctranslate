@@ -11,7 +11,10 @@
  * inserted call is a `$self` method that returns Discord's own value
  * UNCHANGED (the same child, or null where a child is appended) when the
  * install is not paid, when the text is not in a server, when the input is
- * not what it expects, or when anything throws.
+ * not what it expects, or when anything throws. Each one is crash-guarded
+ * (surfaces/guard.tsx): any throw, and the owner's off switch for its
+ * feature, give Discord its own value, and tests/patchGuards.test.ts fails
+ * when a replacement calls a handler that is not guarded.
  *
  * Plain data, so tests and the bundle check can import it without Discord.
  */
@@ -24,6 +27,16 @@ export interface SurfacePatch {
     find: string;
     replacement: Array<{ match: RegExp; replace: string; }>;
 }
+
+/**
+ * The replacements that insert code with no $self handler, by their exact
+ * text. Each one was reviewed as unable to throw (HOVER_CUSTOM_STATUS: `$5` is
+ * the outer component's rest props object, always an object). A new one fails
+ * tests/patchGuards.test.ts until it is reviewed and listed here.
+ */
+export const INLINE_REPLACEMENTS: readonly string[] = [
+    "if($5.sublineSelf=$2,$5.sublineUser=$3?.id,$4){"
+];
 
 const PARSER_FN = String.raw`function\(\)\{[^{}]*\}`;
 const PARSER_ARROW = String.raw`\(\i,\i,\i,\i\)=>\i\(\)\(\i,\i,\{[^{}]*\},\i\)`;
@@ -204,6 +217,62 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         replacement: [{
             match: /(\(0,\i\.jsx\)\(\i\.E,\{userId:\i\.id,userBio:(\i\?\.bio),setLineClamp:!1,textColor:"text-strong"\}\))/,
             replace: "$self.bioInPlace($1,$2)"
+        }]
+    },
+
+    /*
+     * NAMES AND PRONOUNS (0.2.8). Only where the reader is READING (a
+     * message's author, an @mention, the profile card), never where they are
+     * PICKING someone (the member list, the DM list, a voice channel: owner
+     * decision 2026-10-16). One patch per place, so one that stops matching
+     * never takes another place's names with it. Each wraps exactly
+     * one complete expression of Discord's (balanced, so a replacement that
+     * no longer matches leaves Discord's code as it was, never half-patched),
+     * and every method hands that expression back unchanged unless the name
+     * gets a hover (see index.tsx nameHover). All were checked against
+     * Discord's current public web bundle on 2026-10-14: each find in exactly
+     * one module, each match exactly once, the patched module still parses,
+     * and every `arguments[0]` is the props of the named component (not an
+     * arrow function's).
+     */
+    {
+        surface: "names: the message author's name, and the replied-to author's name in a reply preview (Discord renders both with one username component): hover",
+        source: "find from Vencord src/plugins/showMeYourName/index.tsx ('=\"SYSTEM_TAG\"'); matches written against the current bundle. Two branches (with and without display name styles), one replacement each",
+        find: "=\"SYSTEM_TAG\"",
+        replacement: [
+            {
+                // The styled branch: Discord's display-name-styles element.
+                match: /(\(0,\i\.jsx\)\(\i\.\i,\{userName:\i,displayNameStyles:\i,effectDisplayType:[^{}]*\}\))(?=:\i,"data-text":\i\+(\i),)/,
+                replace: "$self.messageAuthorName($1,$2,arguments[0])"
+            },
+            {
+                // The plain branch: the name string itself.
+                match: /(?<=\):)(\i)(?=,"data-text":\i\+(\i),)/,
+                replace: "$self.messageAuthorName($1,$2,arguments[0])"
+            }
+        ]
+    },
+    {
+        surface: "names: @mentions in messages (and in reply previews): hover",
+        source: "find from Vencord src/plugins/mentionAvatars/index.tsx ('.USER_MENTION)'); match written against the current bundle",
+        find: ".USER_MENTION)",
+        replacement: [{
+            // `@${nickname ?? name}`, and the mentioned user from the null check above it.
+            match: /(?<=if\(null==(\i)\)return.{0,160}?onContextMenu:\i,\.\.\.\i,children:)(`@\$\{(\i\?\?\i)\}`)/,
+            replace: "$self.mentionName($2,$3,$1)"
+        }]
+    },
+    {
+        surface: "names and pronouns: the profile card (popout, full profile, DM side profile): a small grey line under the name and the pronouns",
+        source: "Discord build 637268 (2026-10-15): the profile's name block, the display name row then the username and pronouns row, which this appends after. Anchored on onClickDisplayName: because Discord moved location:\"UserProfileUserInfo\" into the inner row's own module in that build",
+        find: "onClickDisplayName:",
+        replacement: [{
+            // Props between onClickUsername and trailing may grow: Canary
+            // added onCreateTag:E there on 2026-10-15 (Stable and PTB not
+            // yet). [^{}()]*? keeps the match inside this one props object,
+            // so one anchor fits all three channels.
+            match: /(\(0,\i\.jsx\)\(\i,\{user:\i,usernameIcon:\i,pronouns:\i,primaryGuild:\i,contextGuildId:\i,onClickUsername:\i,[^{}()]*?trailing:\i\}\))\]/,
+            replace: "$1,$self.profileNameLine(arguments[0])]"
         }]
     }
 ];

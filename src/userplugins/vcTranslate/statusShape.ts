@@ -128,7 +128,18 @@ export const BEACON_ERROR_CODES = [
     /** The IPC call itself rejected — the native half never answered. */
     "ipc-failed",
     /** Anything else an engine reported. */
-    "engine-error"
+    "engine-error",
+    /**
+     * Link could not open Discord's Authorize window: Vencord did not find it
+     * (a Discord update changed it) or opening it failed. Nobody can link then,
+     * so it must reach the feedback box rather than fail silently.
+     */
+    "link-window",
+    /**
+     * Discord's Authorize window threw while it was open. The guard around it
+     * (link.ts) closed it, so Discord kept running, but nobody can link.
+     */
+    "link-crash"
 ] as const;
 
 export type BeaconErrorCode = (typeof BEACON_ERROR_CODES)[number];

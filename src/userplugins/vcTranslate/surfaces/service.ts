@@ -18,6 +18,12 @@
  *
  * NO CONTEXT. Surface texts are sent with no conversation around them; the
  * caller builds the request.
+ *
+ * NAMES AND PRONOUNS (0.2.8) ride the same queues, cache and caps, with two
+ * differences. They are allowed by their own setting (`namesAllowed`), not by
+ * the surfaces one. And they are Google only by themselves: ✦ is asked for a
+ * name only when the reader clicks ✦ (`askQuality`), as one forced request
+ * that spends the surfaces' daily ✦ allowance, never by itself.
  */
 
 import { fitTextToLimit } from "../fitRequest";
@@ -37,8 +43,18 @@ export type SurfaceVerdict = { lang: string; text: string; conf?: number } | "sk
  */
 export type SurfaceOutcome = SurfaceVerdict[] | null | "busy";
 
+/** How a batch is asked for. `force`: the reader clicked ✦, so the relay never skips it. */
+export interface SurfaceSendOptions { force?: true; }
+
 export interface SurfaceDeps {
     isPaid(): boolean;
+    /**
+     * Names and pronouns may be translated: a plan, and the "Names and
+     * pronouns" setting on. Asked instead of `isPaid` for every text wanted
+     * with `name: true`, before it is queued and again before it is sent.
+     * Absent means never.
+     */
+    namesAllowed?(): boolean;
     /**
      * Whether ✦ (the relay) may be asked. False for an Automatic owner without
      * AI: then every surface, tight ones too, is translated by Google (≈), which
@@ -55,7 +71,7 @@ export interface SurfaceDeps {
     targetLang(): string;
     /** The plugin's own local rules: nothing translatable, or already the target language. */
     locallySkipped(text: string): boolean;
-    translate(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome>;
+    translate(tier: SurfaceTier, texts: string[], options?: SurfaceSendOptions): Promise<SurfaceOutcome>;
     cache: SurfaceCache;
     now(): number;
     schedule(fn: () => void, ms: number): unknown;
@@ -153,11 +169,26 @@ export interface WantOptions {
     tight?: boolean;
     /** A kind that may be long (an embed description): the 4,000 cap applies, see fitLongText. */
     long?: boolean;
+    /**
+     * A name or pronouns: allowed by `namesAllowed`, and Google only. ✦ is
+     * never queued by itself for it, whatever the plan (see askQuality).
+     */
+    name?: boolean;
+    /** A name Google cannot read (names.ts aiOnlyName): Google is never asked; only the reader's ✦ can fill it. */
+    noGoogle?: boolean;
 }
 
 const TIERS: SurfaceTier[] = ["fast", "quality"];
 
-interface PendingText { text: string; tight: boolean; wantedAt: number; }
+interface PendingText {
+    text: string;
+    tight: boolean;
+    wantedAt: number;
+    /** Wanted only as a name or pronouns: kept only while `namesAllowed`. */
+    name: boolean;
+    /** The reader clicked ✦ for it: sent in a forced request of its own. */
+    forced: boolean;
+}
 
 export class SurfaceService {
     private readonly pending: Record<SurfaceTier, Map<string, PendingText>> = { fast: new Map(), quality: new Map() };
@@ -193,7 +224,8 @@ export class SurfaceService {
      * `null` means show nothing: not paid, nothing foreign, or nothing yet.
      */
     want(text: string | null | undefined, options: WantOptions = {}): SurfaceEntry | null {
-        if (typeof text !== "string" || !this.deps.isPaid()) return null;
+        const name = options.name === true;
+        if (typeof text !== "string" || !this.allowed(name)) return null;
         let norm = normalizeSurfaceText(text);
         if (options.long) norm = fitLongText(norm).text;
         if (norm === "" || (norm.length > SURFACE_MAX_TEXT_CHARS && !options.long) || this.deps.locallySkipped(norm)) return null;
@@ -201,6 +233,11 @@ export class SurfaceService {
         const entry = this.deps.cache.get(key);
         if (entry?.skip) return null;
         if (entry?.quality) return entry;
+        // A name is Google's only, by itself: ✦ waits for the reader's click.
+        if (name) {
+            if (!entry?.fast && options.noGoogle !== true) this.queue("fast", key, norm, false, true);
+            return entry ?? null;
+        }
         const tight = options.tight === true;
         // A tight mark is ✦ only while ✦ can be had. Without AI, or once
         // today's surface ✦ is spent, it is Google's too: ≈ in place, exactly
@@ -208,6 +245,69 @@ export class SurfaceService {
         if ((!tight || !this.tightQualityOnly()) && !entry?.fast) this.queue("fast", key, norm, tight);
         if (this.qualityAllowed() && this.budgetLeft() > 0) this.queue("quality", key, norm, tight);
         return entry ?? null;
+    }
+
+    /** The reading language right now (a name's script rule is checked against it on every render). */
+    readingLanguage(): string {
+        return this.deps.targetLang();
+    }
+
+    /** Surfaces by `isPaid`; names and pronouns by `namesAllowed`. */
+    private allowed(name: boolean): boolean {
+        if (name) return this.deps.namesAllowed?.() ?? false;
+        return this.deps.isPaid();
+    }
+
+    /**
+     * What is cached for `text`, WITHOUT asking for anything: a hover that
+     * has not opened yet sends nothing.
+     */
+    peek(text: string | null | undefined): SurfaceEntry | null {
+        if (typeof text !== "string") return null;
+        const norm = normalizeSurfaceText(text);
+        if (norm === "") return null;
+        return this.deps.cache.get(surfaceKey(norm, this.deps.targetLang())) ?? null;
+    }
+
+    /** `text` is queued or out on `tier` right now: an answer may still come. */
+    waiting(text: string | null | undefined, tier: SurfaceTier = "fast"): boolean {
+        if (typeof text !== "string") return false;
+        const key = surfaceKey(normalizeSurfaceText(text), this.deps.targetLang());
+        return this.pending[tier].has(key) || this.inFlight[tier].has(key);
+    }
+
+    /**
+     * ✦ for one name or pronouns, because the reader clicked ✦ (AI plans
+     * only). One FORCED request (the relay never skips it), through the same
+     * queue, per-minute cap and daily surfaces allowance as every surface ✦.
+     * Nothing for an install that may not ask ✦, while ✦ is down, or once
+     * today's surface ✦ is spent. True when it is queued, out, or answered.
+     */
+    askQuality(text: string | null | undefined): boolean {
+        if (typeof text !== "string" || !this.allowed(true) || !this.canAskQuality()) return false;
+        const norm = normalizeSurfaceText(text);
+        if (norm === "" || norm.length > SURFACE_MAX_TEXT_CHARS) return false;
+        const key = surfaceKey(norm, this.deps.targetLang());
+        const cached = this.deps.cache.get(key);
+        if (cached?.quality) {
+            // A ✦ for the same text is already here (from a status, say): it
+            // is the reader's answer now, at no cost.
+            if (!cached.asked) {
+                this.deps.cache.put(key, { asked: true });
+                this.notify();
+            }
+            return true;
+        }
+        if (this.inFlight.quality.has(key)) return true;
+        // The reader asked again: an earlier failure's wait does not apply.
+        this.retryAt.quality.delete(key);
+        this.queue("quality", key, norm, false, true, true);
+        return true;
+    }
+
+    /** A ✦ click can be sent: ✦ is allowed, not down, and today's surfaces allowance is not spent. */
+    canAskQuality(): boolean {
+        return this.qualityAllowed() && this.budgetLeft() > 0 && !this.qualityDown();
     }
 
     /** Whether ✦ may be asked right now (see SurfaceDeps.qualityAllowed). */
@@ -256,7 +356,7 @@ export class SurfaceService {
         this.listeners.clear();
     }
 
-    private queue(tier: SurfaceTier, key: string, text: string, tight = false): void {
+    private queue(tier: SurfaceTier, key: string, text: string, tight = false, name = false, forced = false): void {
         if (this.inFlight[tier].has(key)) return;
         const retry = this.retryAt[tier].get(key);
         if (retry !== undefined && this.deps.now() < retry) return;
@@ -265,7 +365,15 @@ export class SurfaceService {
         // on screen now; flush sends from that end first.
         const was = queue.get(key);
         queue.delete(key);
-        queue.set(key, { text, tight: tight && (was?.tight ?? true), wantedAt: this.deps.now() });
+        queue.set(key, {
+            text,
+            tight: tight && (was?.tight ?? true),
+            wantedAt: this.deps.now(),
+            // A name only while every want was one (a status with the same
+            // text keeps it a surface); forced once any want was a click.
+            name: name && (was?.name ?? true),
+            forced: forced || (was?.forced ?? false)
+        });
         // Tight texts only: a list row is wanted again whenever it is on
         // screen, while a roomy line under a message may render just once.
         if (queue.size > SURFACE_MAX_PENDING) {
@@ -315,11 +423,15 @@ export class SurfaceService {
     private async flush(tier: SurfaceTier): Promise<void> {
         const queue = this.pending[tier];
         if (queue.size === 0) return;
-        if (!this.deps.isPaid() || (tier === "quality" && !this.qualityAllowed())) {
+        if (tier === "quality" && !this.qualityAllowed()) {
             // The plan changed under a queued batch: send nothing.
             queue.clear();
             return;
         }
+        // The plan or a setting changed under a queued batch: whatever is no
+        // longer allowed is not sent.
+        for (const [key, p] of [...queue.entries()]) if (!this.allowed(p.name)) queue.delete(key);
+        if (queue.size === 0) return;
         let max = this.deps.maxBatch ?? SURFACE_MAX_BATCH;
         if (tier === "fast") max = Math.min(max, this.deps.maxFastBatch ?? SURFACE_MAX_FAST_BATCH);
         const maxBytes = this.deps.maxBatchBytes ?? SURFACE_MAX_BATCH_BYTES;
@@ -375,8 +487,14 @@ export class SurfaceService {
         const batch: Array<[string, string]> = [];
         let bytes = 0;
         let units = 0;
-        for (const [key, { text }] of [...queue.entries()].reverse()) {
+        // A ✦ click is FORCED (the relay never skips it) and an ordinary text
+        // is not, so one request carries one kind: the newest text's. The
+        // other kind waits for the next request.
+        const newest = [...queue.values()].at(-1);
+        const forced = tier === "quality" && newest?.forced === true;
+        for (const [key, { text, forced: f }] of [...queue.entries()].reverse()) {
             if (batch.length >= max) break;
+            if (tier === "quality" && f !== forced) continue;
             const size = byteLength(text);
             if (batch.length > 0 && bytes + size > maxBytes) break;
             const cost = surfaceCost(text);
@@ -409,7 +527,7 @@ export class SurfaceService {
         this.deps.debug?.(`[surface] ${tier}: ${texts.length} text(s) in one request`);
         let outcome: SurfaceOutcome;
         try {
-            outcome = await this.deps.translate(tier, texts);
+            outcome = await this.deps.translate(tier, texts, forced ? { force: true } : undefined);
         } catch {
             outcome = null;
         }
@@ -450,6 +568,12 @@ export class SurfaceService {
                 // not cancelled (✦ decides), and ≈ is not asked again until
                 // the fail retry, so a render loop cannot re-send it.
                 this.retryAt[tier].set(key, now + (this.deps.failRetryMs ?? SURFACE_FAIL_RETRY_MS));
+            } else if (verdict === "skip" && forced) {
+                // A current relay never skips a forced request; an older one
+                // may. That is no verdict about a name the reader asked for:
+                // nothing is cached (a ≈ line stays), and it may be clicked
+                // again after the fail wait.
+                this.retryAt[tier].set(key, now + (this.deps.failRetryMs ?? SURFACE_FAIL_RETRY_MS));
             } else if (verdict === "skip") {
                 // A real verdict: Google saw the reader's own language or
                 // handed the text back unchanged, or ✦ decided it needs no
@@ -463,7 +587,9 @@ export class SurfaceService {
                 this.pending.fast.delete(key);
                 this.pending.quality.delete(key);
             } else {
-                this.deps.cache.put(key, tier === "quality" ? { quality: verdict } : { fast: verdict });
+                // A forced ✦ is the reader's own click on a name: marked asked,
+                // so it shows on that name whatever its script.
+                this.deps.cache.put(key, tier === "quality" ? { quality: verdict, ...(forced ? { asked: true as const } : {}) } : { fast: verdict });
                 if (tier === "quality") this.pending.fast.delete(key);
             }
             const retry = this.retryAt[tier].get(key);

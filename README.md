@@ -2,7 +2,7 @@
 
 This is the complete corresponding source for the translation plugin inside [Subline](https://subline.page), released under the GPL-3.0-or-later (see `LICENSE`).
 
-Each tag matches one Subline release. The tag `v0.2.7` is the source of Subline 0.2.7, build id `4bf52aead2cf3a39`.
+Each tag matches one Subline release. The tag `v0.2.8` is the source of Subline 0.2.8, build id `5ac0b15b45ddf81a`.
 
 ## What is here
 
@@ -10,8 +10,12 @@ Each tag matches one Subline release. The tag `v0.2.7` is the source of Subline 
 |---|---|
 | `src/userplugins/vcTranslate/` | The plugin, a Vencord userplugin. |
 | `installer/vencord.pin.json` | The exact Vencord commit the plugin is built with. |
-| `installer/scripts/buildMod.mjs` | The build: it fetches that Vencord commit, adds the plugin, applies the changes below, and builds. |
-| `installer/scripts/vencordRewrites.mjs` | Changes the build makes to Vencord's own files. |
+| `installer/scripts/buildMod.mjs` | The desktop build: it fetches that Vencord commit, adds the plugin, applies the changes below, and builds. |
+| `installer/scripts/buildWeb.mjs` | The browser add-on build: the same Vencord commit and plugin, built for the browser and packed for each store. |
+| `installer/scripts/vencordSource.mjs` | The steps both builds share: fetching Vencord, adding the plugin, the Subline settings tab and branding. |
+| `installer/scripts/vencordRewrites.mjs` | Changes the builds make to Vencord's own files. |
+| `installer/scripts/webManifest.mjs` | The add-on's manifests and permissions. |
+| `installer/packaging/browser/` | The add-on's own files: its background, the page bridge, the content script, the header rule and the icons. |
 | `installer/packaging/branding/sublineTab.tsx` | The Subline settings tab the build adds to Vencord. |
 | `installer/src/bundle/spec.ts` | The bundle manifest and its checks. |
 | `scripts/stampBuild.mjs` | Computes the build id. |

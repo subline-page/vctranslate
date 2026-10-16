@@ -21,11 +21,20 @@ export const SETTINGS_COPY = {
         codeLabel: "Your code:",
         copy: "Copy",
         copied: "Code copied.",
-        activate: "Activate",
+        /** Where Activate was: buys Automatic (it opens the panel with the price first). */
+        buyAutomatic: "Buy Automatic",
         addAi: "Add AI",
+        /** The account line, once linked. {name} is the Discord username, read locally (UserStore). */
+        linkedTo: "Linked to @{name}",
+        /** In place of the plan while the Discord account is not linked, and its link. */
+        notLinked: "Link your Discord account to use Subline.",
+        link: "Link",
         /** In place of Activate / Add AI while a payment is on its way (same words as UPGRADE_COPY.paymentPending). */
         paymentPending: "Payment being confirmed",
-        enterCode: "Enter a code"
+        enterCode: "Enter a code",
+        /** The browser add-on only, with a plan (0.2.8): the line, then its link to subline.page. */
+        appPrompt: "Also want it in the Discord app?",
+        appLink: "Download Subline"
     },
     targetLang: {
         title: "Reading language",
@@ -42,6 +51,10 @@ export const SETTINGS_COPY = {
     translateSurfaces: {
         title: "Profiles, embeds and more",
         description: "Also translate statuses, bios, embeds, polls, topics and titles."
+    },
+    translateNames: {
+        title: "Names and pronouns",
+        description: "Hover a name to see it in your language. Profiles show it under the name."
     },
     debugLogging: {
         title: "Debug log",

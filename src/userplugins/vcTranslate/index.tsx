@@ -4,12 +4,12 @@ import { addMessageAccessory, removeMessageAccessory } from "@api/MessageAccesso
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
 import { popNotice, showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
-import definePlugin, { PluginNative } from "@utils/types";
+import definePlugin from "@utils/types";
 import { relaunch } from "@utils/native";
 import { copyToClipboard } from "@utils/clipboard";
 import {
     ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, Menu, MessageStore,
-    Parser, React, SelectedChannelStore, showToast, UserStore
+    Parser, React, SelectedChannelStore, UserStore
 } from "@webpack/common";
 import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import type { Message } from "@vencord/discord-types";
@@ -21,14 +21,29 @@ import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
 import { clipParentText, fitLlmRequest, joinParts, LLM_TEXT_MAX, partId, shrinkAfterRefusal, splitTextToLimit, withParentCopies } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
-import { isChannelDisabled, isChannelEnabled, loadEnabledChannels, toggleChannel, toggleChannelOptOut } from "./channels";
+import { channelAccount, forgetChannelAccount, isChannelDisabled, isChannelEnabled, subscribeChannels, toggleChannel, toggleChannelOptOut, useChannelAccount } from "./channels";
+import { beginChannelSync, channelChangedHere, channelOpened, channelSyncFocus, endChannelSync } from "./channelSync";
+import { bindPrefStore, forgetPrefAccount, onPrefChangedHere, prefAccount, type PrefKey, type PrefValue, usePrefAccount, withoutPrefStamp } from "./prefs";
+import { beginPrefSync, endPrefSync, prefChangedHere, prefSyncFocus } from "./prefSync";
 import { __resetCooldowns, cooldownUntil, loadCooldowns, setCooldown } from "./cooldownStore";
 import { DECODED_TITLE, decodedPrefix, decodeMessage, translatableText } from "./decode";
 import { isConfidentlyTargetLanguage } from "./detectLang";
 import {
-    entitlementLevel, ENTITLEMENT_REFRESH_MS, getEntitlement, holderFor, type Level, loadEntitlement, setCurrentHolder,
-    setEntitlement, subscribeEntitlement
+    ENTITLEMENT_KEY, entitlementLevel, ENTITLEMENT_REFRESH_MS, getEntitlement, holderFor, type Level, linkState, loadEntitlement, mustLink, purchaseStartedHere, setCurrentHolder,
+    setEntitlement, setEntitlementKey, subscribeEntitlement
 } from "./entitlement";
+import {
+    accountKeyFor, bindLegacyInstall, type Binding, type CodeFields, type CodeFieldStore, codeSlotFor, connectBindingSetting, dropPendingBind,
+    forgetSessionBinding, installForAccount, type LocalAccount, notePendingBind, noteLocalAccount, parseCodeFields, type PendingBind, planElsewhere,
+    NOBODY, settleLegacyLink, swapCodeFields
+} from "./account";
+import { openLinkWindow, silentLinkAttempt } from "./link";
+import { runBrowserLink } from "./linkFallback";
+import {
+    type AccountView, askPairCode, fill, moveDate, openAccountConfirm, openElsewherePlanChoice, openMessage, openMoveHere, openMoveStart, openPayElsewhere,
+    setPanelCrashHandler
+} from "./linkPanels";
+import type { RelayRefusal } from "./native";
 import { contentHash, loadPreviewLedger, PRICING_URL, rememberPreview, type PreviewResult } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
@@ -38,10 +53,12 @@ import { languageLabel } from "./langLabel";
 import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
+import { toast, type ToastKind } from "./toast";
 import { shouldSkip } from "./skip";
 import {
-    connectInstallIdSetting, EARLY_CHECK_MS, earlyCheckSince, endEarlyCheck, installIdOnce, knownInstallId, loadLocalTasteCount, markPriorHintDone, markTasteExhausted, noteRelayClock, noteTasteSpent,
-    priorUseHint, recordTasteQuota, rolloverTasteIfNewUtcDay, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteRemaining
+    connectInstallIdSetting, EARLY_CHECK_MS, earlyCheckSince, endEarlyCheck, forgetInstallId, installIdOnce, knownInstallId, loadLocalTasteCount,
+    markPriorHintDone, markTasteExhausted, noteRelayClock, noteTasteSpent, priorUseHint, recordTasteQuota, requireAccount, rolloverTasteIfNewUtcDay,
+    setTasteScope, TASTE_CAP, tasteBearer, tasteCap, tasteExhausted, tasteRemaining, useInstallId
 } from "./taste";
 import {
     recordError, recordPluginLoaded, recordRendered, recordTranslation, resetStatusBeacon
@@ -57,10 +74,10 @@ import {
     type BatchRequest, type EngineId, type PendingMessage, type Result
 } from "./types";
 import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
-import { createCheckoutFlow, type CheckoutFlow, type Plan } from "./checkout";
+import { createCheckoutFlow, type CheckoutFlow, type Plan, type ReservedTab, reserveTab } from "./checkout";
 import { isRtlLang, normalizeTargetLang } from "./languages";
-import { isPaymentPending, openUpgrade, registerUpgradeOpener, setPaymentPending } from "./upgradeBridge";
-import { SUPPORT_EMAIL, UPGRADE_COPY } from "./upgradeCopy";
+import { isPaymentPending, openUpgrade, registerUpgradeOpener, setPaymentPending, settingsShowing } from "./upgradeBridge";
+import { ACCOUNT_COPY, ADDON_RELOAD_COPY, FALLBACK_COPY, LINK_COPY, MOVE_COPY, SUPPORT_EMAIL, UPGRADE_COPY } from "./upgradeCopy";
 import {
     closePanel, type CodeSubmitResult, openActivatePanel, openCodeEntry, openPaymentPendingPanel, openUpgradePanel
 } from "./upgradePanel";
@@ -73,15 +90,21 @@ import {
     messageSurfaceTexts, onboardingPromptTexts,
     type SurfaceKind, type SurfaceText
 } from "./surfaces/extract";
+import { splitEdgeMentions, withEdgeMentions } from "./mentionEdges";
+import { aiOnlyName, nameToTranslate, pronounsToTranslate } from "./surfaces/names";
+import { resetNameTips, SafeNameHover, SafeProfileNameLine } from "./surfaces/namesUi";
 import { SURFACE_PATCHES } from "./surfaces/patches";
-import { SurfaceService, type SurfaceOutcome, type SurfaceTier } from "./surfaces/service";
+import { guard, guardCatchesSoFar, guardHook, type HandlerId, isFeatureOff, setGuardCatchSink } from "./surfaces/guard";
+import { type FeatureId, offListFrom } from "./surfaces/features";
+import { createGuardHealth, GUARD_STORE_KEY, type GuardHealth } from "./guardHealth";
+import { SurfaceService, type SurfaceOutcome, type SurfaceSendOptions, type SurfaceTier } from "./surfaces/service";
 import {
-    BioInPlace, DecodedStatus, resetInPlaceFlips, safe, setSurfaceRtl, setSurfaceService, StatusBubbleText, SurfaceLines, tightTranslation, TightSwap,
+    BioInPlace, currentSurfaceService, DecodedStatus, resetInPlaceFlips, safe, setSurfaceRtl, setSurfaceService, StatusBubbleText, SurfaceLines, tightTranslation, TightSwap,
     useSurfaceVersion
 } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
+import { isDesktop, onWebAddonGone, transport } from "./transport";
 
-const Native = VencordNative.pluginHelpers.VcTranslate as PluginNative<typeof import("./native")>;
 const logger = new Logger("VcTranslate");
 
 // Two independent pipelines over the same messages. The fast one exists so the
@@ -98,11 +121,13 @@ let updateAskStart: ReturnType<typeof setTimeout> | null = null;
 let updateAskTimer: ReturnType<typeof setInterval> | null = null;
 /** Did Subline's patches apply in this Discord? Checked once per session (patchHealth.ts). */
 let patchHealthWatch: PatchHealthWatch | null = null;
+/** Stops listening for the browser add-on being updated under this page (transport.ts). */
+let unsubscribeAddonGone: (() => void) | null = null;
 
 /**
  * Wire the patch health check to the running Discord and Vencord. Everything
  * it touches is read defensively: a missing global is "nothing to check",
- * never an error. Sends through the native half, like every relay call.
+ * never an error. Sends through the transport, like every relay call.
  */
 function startPatchHealth(): void {
     patchHealthWatch?.stop();
@@ -116,7 +141,7 @@ function startPatchHealth(): void {
             load: () => DataStore.get(HEALTH_STORE_KEY),
             save: value => DataStore.set(HEALTH_STORE_KEY, value),
             scan: seen => scanFromVencord((globalThis as any).Vencord, seen),
-            send: async report => Native.relayPatchHealth(tasteBearer(await installIdOnce()), JSON.stringify(report)),
+            send: async report => transport.relayPatchHealth(tasteBearer(await installIdOnce()), JSON.stringify(report)),
             log: (message, detail) => logger.warn(message, detail)
         }, messagesSeen),
         setTimeout: (fn, ms) => setTimeout(fn, ms),
@@ -124,6 +149,38 @@ function startPatchHealth(): void {
     });
     patchHealthWatch.start();
 }
+/** Crash-guard catches, reported to the relay by handler name (guardHealth.ts). */
+let guardHealth: GuardHealth | null = null;
+
+/**
+ * Wire the crash guards (surfaces/guard.tsx) to the relay report. The error
+ * itself is logged here only; the report carries the handler name.
+ */
+function startGuardHealth(): void {
+    guardHealth?.stop();
+    guardHealth = createGuardHealth({
+        now: () => Date.now(),
+        pluginVersion: PLUGIN_VERSION,
+        buildId: BUILD_ID,
+        channel: () => (globalThis as any).GLOBAL_ENV?.RELEASE_CHANNEL,
+        buildNumber: () => buildNumberFromVencord((globalThis as any).Vencord),
+        load: () => DataStore.get(GUARD_STORE_KEY),
+        save: value => DataStore.set(GUARD_STORE_KEY, value),
+        send: async report => transport.relayPatchHealth(tasteBearer(await installIdOnce()), JSON.stringify(report)),
+        setTimeout: (fn, ms) => setTimeout(fn, ms),
+        clearTimeout: handle => clearTimeout(handle as ReturnType<typeof setTimeout>),
+        log: (message, detail) => logger.warn(message, detail)
+    });
+    const watch = guardHealth;
+    setGuardCatchSink((handler, error) => {
+        logger.warn(`Crash guard: ${handler} threw; Discord's own is shown.`, String((error as any)?.message ?? error).slice(0, 300));
+        watch.note(handler);
+    });
+    guardHealth.start();
+    // Caught before start (a parser Discord loaded first): reported too.
+    for (const handler of new Set(guardCatchesSoFar())) watch.note(handler);
+}
+
 let sessionFallback = false;   // set when the configured LLM engine is unusable this session
 /**
  * Which engine+key `sessionFallback` was set against.
@@ -664,6 +721,1134 @@ async function relayCredentials(): Promise<{ credential: string; install: string
     return { credential: code !== "" ? code : install, install };
 }
 
+/* ---------------------------------------------------- Discord account -- */
+
+/**
+ * WHICH DISCORD ACCOUNT IS SIGNED IN (0.2.8). A plan belongs to one Discord
+ * account, so Subline follows the signed-in one: the install id account.ts
+ * gives it, the stored answer and the saved code that go with that id. Until
+ * a confirmed link binds the install id from before (the installer's), every
+ * account on this computer shares it, so a plan from before 0.2.8 keeps
+ * working whoever signs in first; after it, each other account has its own.
+ * Until an account is known, nothing asks the relay (installIdOnce waits)
+ * and nothing is owned.
+ *
+ * Resolved at start() when Discord already knows the user, and again on
+ * every CONNECTION_OPEN (Discord's start, a reconnect, and an account switch:
+ * a switch is a new connection). Switches run one after another.
+ */
+let currentAccount: string | null = null;
+/** The current account uses the install id from before (account.ts rule 1, or it is the bound account). */
+let currentLegacy = false;
+/** ...and a binding here is known to say it is this account's (account.ts rules 2 and 3). */
+let legacyOwned = false;
+/** The accounts that linked on this computer: local names and whether their plan was live (account.ts). */
+let localAccounts: Record<string, LocalAccount> = {};
+let accountQueue: Promise<void> = Promise.resolve();
+/** Bumped by every switch and by stop(): work for an older account changes nothing. */
+let accountEpoch = 0;
+/** True while the code fields are swapped for a switch (see the settings handler). */
+let swappingCodeFields = false;
+/** The saved code the settings handler last saw. */
+let lastSeenCode = "";
+
+/** The plugin's settings, as the code fields of one slot (account.ts). */
+const CODE_FIELDS: CodeFieldStore = {
+    read: (): CodeFields => ({
+        code: typeof settings.store.sublineCode === "string" ? settings.store.sublineCode : "",
+        cleared: typeof settings.store.clearedPurchaseCode === "string" ? settings.store.clearedPurchaseCode : "",
+        deadSeen: deadCodeSeen()
+    }),
+    write: fields => {
+        settings.store.clearedPurchaseCode = fields.cleared;
+        settings.store.deadCodeSeen = fields.deadSeen;
+        settings.store.sublineCode = fields.code;
+    },
+    holder: () => typeof settings.store.codeAccount === "string" ? settings.store.codeAccount : "",
+    setHolder: account => { settings.store.codeAccount = account; },
+    stash: () => {
+        const raw = settings.store.accountCodes as unknown;
+        const out: Record<string, CodeFields> = {};
+        if (raw && typeof raw === "object") for (const [k, v] of Object.entries(raw)) out[k] = parseCodeFields(v);
+        return out;
+    },
+    setStash: stash => { settings.store.accountCodes = stash; }
+};
+
+/** The signed-in Discord user's id, or null while Discord does not know it yet. */
+function signedInUserId(): string | null {
+    try {
+        const id = UserStore.getCurrentUser()?.id;
+        return typeof id === "string" && id !== "" ? id : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The signed-in account, when it is the one Subline follows now: its id
+ * (sent as `expect` with a link, compared by the relay, never stored) and
+ * what a window shows of it (name, avatar; local, never sent). Null while
+ * Discord does not know the user, or a switch has not reached Subline yet:
+ * nothing can be named then, so nothing binds.
+ */
+function signedInAccount(): { id: string; view: AccountView; } | null {
+    try {
+        const user = UserStore.getCurrentUser() as { id?: unknown; username?: unknown; getAvatarURL?: (guildId?: string, size?: number) => unknown; } | undefined;
+        const id = typeof user?.id === "string" ? user.id : "";
+        if (id === "" || currentAccount === null || accountKeyFor(id) !== currentAccount) return null;
+        const name = typeof user?.username === "string" && user.username !== "" ? user.username : "";
+        if (name === "") return null;
+        let avatarUrl: string | undefined;
+        try {
+            const url = user?.getAvatarURL?.(undefined, 80);
+            if (typeof url === "string") avatarUrl = url;
+        } catch { /* no avatar, the name is enough */ }
+        return { id, view: { name, ...(avatarUrl !== undefined ? { avatarUrl } : {}) } };
+    } catch {
+        return null;
+    }
+}
+
+/** CONNECTION_OPEN: Discord connected, possibly as another account. */
+function onConnectionOpen(payload: any): void {
+    const fromPayload = payload?.user?.id;
+    const id = typeof fromPayload === "string" && fromPayload !== "" ? fromPayload : signedInUserId();
+    if (id !== null) void followAccount(id);
+}
+
+/** Make the account with this Discord user id the current one (queued). */
+function followAccount(userId: string): Promise<void> {
+    const account = accountKeyFor(userId);
+    accountQueue = accountQueue
+        .then(() => enterAccount(account))
+        .catch(err => logger.warn("Couldn't switch Subline to the signed-in Discord account.", err));
+    return accountQueue;
+}
+
+/**
+ * Leave whatever belonged to the previous account: its status answers in
+ * flight, its retries, its checkout, its notices, its install id.
+ */
+function leaveAccount(): void {
+    statusSession++;
+    clearStatusRetry();
+    checkoutFlow?.stop();
+    checkoutFlow = null;
+    setPaymentPending(false);
+    if (deadRecheckTimer !== null) clearTimeout(deadRecheckTimer);
+    deadRecheckTimer = null;
+    deviceLimited = false;
+    announcedPurchase = "";
+    earlyGrantPending = false;
+    autoDroppedCode = "";
+    renewalFollowUp = null;
+    askedForExpiry = null;
+    afterLink = null;
+    confirmedFor = null;
+    takeNotice("activation");
+    takeNotice("link");
+    // Its 🌐 and settings sync: the next account starts its own once the relay says it is linked.
+    endChannelSync();
+    endPrefSync();
+    takeDownCheckingNotice();
+    forgetInstallId();
+    currentAccount = null;
+    currentLegacy = false;
+    legacyOwned = false;
+}
+
+/**
+ * Enter the current account again, for a fresh look at which install id it
+ * uses: the install id from before turned out to be another account's
+ * (account.ts rule 3). Queued like a switch; nothing when the account changed
+ * meanwhile (the switch did it).
+ */
+function refollowAccount(account: string): void {
+    accountQueue = accountQueue
+        .then(() => currentAccount === account ? enterAccount(account, true) : undefined)
+        .catch(err => logger.warn("Couldn't give this Discord account an install id of its own.", err));
+}
+
+async function enterAccount(account: string, again = false): Promise<void> {
+    if (account === currentAccount && !again) return;
+    const epoch = ++accountEpoch;
+    leaveAccount();
+    // Its own 🌐 lists (channels.ts): the lists of the account before are
+    // off from this moment, and these are loaded before anything translates.
+    const lists = channelAccount() === account ? null : useChannelAccount(account);
+    // Its own Subline settings (prefs.ts), written into Settings at once.
+    const prefs = prefAccount() === account ? null : usePrefAccount(account);
+    const { installId, legacy, accounts } = await installForAccount(account);
+    if (epoch !== accountEpoch) return;
+    if (lists !== null) await lists;
+    if (prefs !== null) await prefs;
+    if (epoch !== accountEpoch) return;
+    // The saved code is this install's from here on. The settings handler
+    // ignores the writes: this is not the reader clearing their code.
+    swappingCodeFields = true;
+    try {
+        swapCodeFields(CODE_FIELDS, codeSlotFor(account, legacy));
+    } finally {
+        swappingCodeFields = false;
+    }
+    lastSeenCode = savedCode();
+    normaliseEngineSetting();
+    setTasteScope(legacy ? "" : account);
+    setEntitlementKey(legacy ? ENTITLEMENT_KEY : `${ENTITLEMENT_KEY}:${account}`);
+    currentAccount = account;
+    currentLegacy = legacy;
+    localAccounts = accounts;
+    useInstallId(installId);
+    setCurrentHolder(holderFor(savedCode(), installId));
+    await loadEntitlement();
+    await loadLocalTasteCount();
+    if (epoch !== accountEpoch) return;
+    tasteLog(`following the signed-in Discord account (${legacy ? "the install id from before" : "its own install id"})`);
+    lastTickLevel = entitlementLevel();
+    if (fastBatcher !== null) {
+        releaseFallbackIfCredentialChanged();
+        rebuildBatcher();
+    }
+    onEntitlementChanged();
+    void refreshEntitlement();
+    // A move started on another account waits for this one (Move my plan).
+    void offerMoveHere();
+}
+
+/**
+ * What this computer remembers about the current account once it is linked:
+ * its name (for "Your Subline plan is on @name" on another account) and
+ * whether its plan is live. Written only when it changed (account.ts).
+ */
+function rememberCurrentAccount(): void {
+    const account = currentAccount;
+    const me = signedInAccount();
+    if (account === null || me === null || linkState() !== "linked") return;
+    void noteLocalAccount(account, { name: me.view.name, plan: activated() }).then(accounts => {
+        if (accounts !== null && account === currentAccount) localAccounts = accounts;
+    });
+}
+
+/**
+ * The 🌐 choices follow the Discord account (channelSync.ts): linked, the
+ * current account's lists are kept in step with the relay's copy; anything
+ * else, they stay on this computer, exactly as before. Called with every
+ * status answer; a session already running for the account goes on.
+ */
+function followChannelChoices(): void {
+    const account = currentAccount;
+    if (account === null || linkState() !== "linked") {
+        endChannelSync();
+        return;
+    }
+    beginChannelSync(account, {
+        call: async json => {
+            try {
+                const { credential, install } = await relayCredentials();
+                // Signed in as someone else meanwhile: never this account's call.
+                if (currentAccount !== account) return { ok: false, error: "network" };
+                return await transport.relayChannels(credential, install, json);
+            } catch {
+                return { ok: false, error: "network" };
+            }
+        },
+        candidates: () => {
+            const out: string[] = [];
+            try {
+                const open = SelectedChannelStore.getChannelId();
+                if (typeof open === "string") out.push(open);
+            } catch { /* the lists alone */ }
+            try {
+                const dms = (ChannelStore as { getSortedPrivateChannels?: () => unknown; }).getSortedPrivateChannels?.();
+                if (Array.isArray(dms)) for (const c of dms) if (typeof c?.id === "string") out.push(c.id);
+            } catch { /* the lists alone */ }
+            return out;
+        },
+        applied: ids => {
+            // The open channel switched on elsewhere: what is on screen is translated now.
+            let open: string | null = null;
+            try { open = SelectedChannelStore.getChannelId() ?? null; } catch { /* nothing open */ }
+            if (open !== null && ids.includes(open) && channelActive(open)) catchUp(open);
+        },
+        log: tasteLog
+    });
+}
+
+/**
+ * Subline's settings follow the Discord account (prefSync.ts), like the 🌐
+ * choices: linked, the current account's settings are kept in step with the
+ * relay's copy; anything else, they stay on this computer, exactly as
+ * before. Called with every status answer; a session already running for
+ * the account goes on.
+ */
+function followPrefs(): void {
+    const account = currentAccount;
+    if (account === null || linkState() !== "linked") {
+        endPrefSync();
+        return;
+    }
+    beginPrefSync(account, {
+        call: async json => {
+            try {
+                const { credential, install } = await relayCredentials();
+                // Signed in as someone else meanwhile: never this account's call.
+                if (currentAccount !== account) return { ok: false, error: "network" };
+                return await transport.relayPrefs(credential, install, json);
+            } catch {
+                return { ok: false, error: "network" };
+            }
+        },
+        // Written into Settings already: its own change hook did the rest.
+        applied: keys => tasteLog(`settings from another computer: ${keys.join(", ")}`),
+        log: tasteLog
+    });
+}
+
+/* ------------------------------------------------------------- linking -- */
+
+/**
+ * NEVER A SILENT OUTCOME. Say what a Link, Buy, Add AI, code or Move came
+ * to. A toast is drawn UNDER Subline's Settings, so while Settings is on
+ * screen (upgradeBridge settingsShowing) the sentence opens a window, which
+ * is always on top. Elsewhere it stays a short toast, as before: no extra
+ * window on the main screen. A window that cannot open falls back to the
+ * toast, never to nothing.
+ */
+function sayResult(text: string, kind: ToastKind = "failure"): void {
+    if (settingsShowing() && openMessage(LINK_COPY.resultTitle, text)) return;
+    toast(text, kind);
+}
+
+/**
+ * The relay said this account is not linked to a Discord account (API 3) and
+ * this computer has no plan from before: nothing translates, and the one
+ * thing to do is Link. A prior payer (mustLink) is not this: its plan works,
+ * and its bar only asks (showMustLinkBar).
+ */
+function linkNeeded(): boolean {
+    return entitlementLevel() === "none" && linkState() === "unlinked" && !mustLink();
+}
+
+/** The signed-in Discord username, read locally for the "Linked to" line. Never sent. */
+function signedInName(): string {
+    try {
+        const name = UserStore.getCurrentUser()?.username;
+        return typeof name === "string" ? name : "";
+    } catch {
+        return "";
+    }
+}
+
+let linkBusy = false;
+
+/**
+ * EVERY BIND NAMES THE ACCOUNT (0.2.8 spec, decision 2). Before a purchase,
+ * a code, or a link that would bind this computer's plan from before, the
+ * account confirm names the signed-in account ("This plan will belong to
+ * @name"). `then` runs only on "Yes, use @name", inside that click, and only
+ * if the same account is still signed in. "Use another account" explains how
+ * to switch and stores nothing. A confirm already given in this same flow (a
+ * Link that came first, see afterLink) is not asked again.
+ */
+let confirmedFor: { account: string; until: number; } | null = null;
+/** How long a confirm given for a Link covers the purchase or code that the link was for. */
+const CONFIRM_CARRIES_MS = 10 * 60_000;
+
+function withAccountConfirm(then: () => void): void {
+    const me = signedInAccount();
+    if (me === null) {
+        sayResult(LINK_COPY.noAccount, "failure");
+        return;
+    }
+    const carried = confirmedFor;
+    confirmedFor = null;
+    if (carried !== null && carried.account === currentAccount && Date.now() < carried.until) {
+        then();
+        return;
+    }
+    const epoch = accountEpoch;
+    const shown = openAccountConfirm(me.view, {
+        yes: () => {
+            // Signed in as someone else meanwhile: that account never confirmed.
+            if (epoch !== accountEpoch) return;
+            then();
+        }
+    });
+    if (!shown) {
+        // Nothing binds without the confirm.
+        logger.error("The account confirm could not be opened.");
+        sayResult(LINK_COPY.ownWindowFailed, "failure");
+    }
+}
+
+/**
+ * What a Link started for (Add AI or a code, for a prior payer whose
+ * checkout needs a link first): run once the link answers linked, for the
+ * same account. The confirm given before the Link covers it (confirmedFor).
+ */
+let afterLink: { account: string; run: () => void; } | null = null;
+
+/**
+ * Link with the account confirm first: for a computer with a plan from
+ * before (mustLink), whose link binds that plan to the account. `after`
+ * runs once linked (see afterLink).
+ */
+function startLinkConfirmed(after?: () => void): void {
+    withAccountConfirm(() => {
+        afterLink = after !== undefined && currentAccount !== null ? { account: currentAccount, run: after } : null;
+        startLink();
+    });
+}
+
+/**
+ * This computer may have a plan that a link would bind: the relay said so
+ * (mustLink), a purchase started here before 0.2.8 is still on its way
+ * (purchaseStartedHere: it lands on whichever account links this install),
+ * or a code is saved here while the account is not linked (its plan joins
+ * the account the link names). Such a link asks the account confirm first,
+ * and is never made silently.
+ */
+function hasUnlinkedPlan(): boolean {
+    return mustLink() || purchaseStartedHere() || (linkState() !== "linked" && savedCode() !== "");
+}
+
+/** Link from the Link bar or Settings: the confirm first when it would bind a plan from before. */
+function linkFromSettings(): void {
+    if (hasUnlinkedPlan()) startLinkConfirmed();
+    else startLink();
+}
+
+/**
+ * The Link bar for a prior payer (0.2.8, mustLink): the plan keeps working,
+ * and the bar asks to link it to the account it belongs to. Never a block,
+ * and its Link asks which account first. Gone once linked.
+ */
+function showMustLinkBar(): void {
+    if (!mustLink()) {
+        takeNotice("link");
+        return;
+    }
+    putNotice("link", LINK_COPY.mustLinkNotice, LINK_COPY.button, () => startLinkConfirmed());
+}
+
+/**
+ * Silent re-link (link.ts silentLinkAttempt): a Discord account that already
+ * approved Subline elsewhere links with no window. Tried once per Discord
+ * account per session, before the Link bar would first show; a try that
+ * gives no code is not repeated this session (the bar and Link by hand
+ * remain). `silentRunningFor` is the account whose try is in flight. NEVER
+ * for a computer with a plan from before (mustLink): binding that plan needs
+ * the account confirm (no takeover). Nor while a purchase started here before
+ * 0.2.8 is still on its way (purchaseStartedHere): it would land on this account.
+ */
+const silentTried = new Set<string>();
+let silentRunningFor: string | null = null;
+
+/** Start the silent try for this account if it has not had one. True while it runs (the caller shows no bar yet). */
+function startSilentLink(): boolean {
+    const key = currentAccount ?? "";
+    if (silentRunningFor === key) return true;
+    if (silentTried.has(key) || linkBusy || hasUnlinkedPlan()) return false;
+    silentTried.add(key);
+    silentRunningFor = key;
+    const epoch = accountEpoch;
+    void (async () => {
+        let attempt: Awaited<ReturnType<typeof silentLinkAttempt>>;
+        try {
+            attempt = await silentLinkAttempt();
+        } catch {
+            attempt = { code: null, reason: "the check failed" };
+        }
+        // Signed in as someone else meanwhile (or stopped): not this account's.
+        if (epoch !== accountEpoch) {
+            if (silentRunningFor === key) silentRunningFor = null;
+            return;
+        }
+        if (attempt.code === null) {
+            logger.info(`Not linked by itself (${attempt.reason}). The Link bar shows.`);
+            silentRunningFor = null;
+            putLinkBarBack();
+            return;
+        }
+        logger.info("This Discord account approved Subline before: linking with no window.");
+        await finishLink(attempt.code, true);
+    })().catch(err => {
+        silentRunningFor = null;
+        logger.warn("The silent link stopped.", err);
+        putLinkBarBack();
+    });
+    return true;
+}
+
+/**
+ * Link: Discord's Authorize window (link.ts). Authorize hands back a code,
+ * which goes to the relay (POST /v1/link); its answer is taken in like a
+ * status answer. Cancel changes nothing: the bar stays. A window Vencord
+ * cannot find, or one that throws, is replaced by Discord's authorize page
+ * in the browser (linkFallback.ts), so a Discord update never stops anyone
+ * from linking.
+ */
+function startLink(): void {
+    if (linkBusy) return;
+    // The window broke once this session: straight to the browser, inside
+    // this click (in a browser the fallback's tab can open only here).
+    if (authorizeWindowBroken) {
+        void runFallback(null, reserveFallbackTab());
+        return;
+    }
+    const opened = openLinkWindow({
+        onCode: code => { void finishLink(code); },
+        onNoCode: () => sayResult(LINK_COPY.refused, "failure"),
+        // Discord takes the bar down when Link is pressed. Any close (Cancel,
+        // the X, Escape) puts it back while the account is still not linked.
+        // After Authorize the link is still at the relay: finishLink decides.
+        onClosed: () => {
+            if (linkBusy) return;
+            // Closed without a code (Cancel, the X): what the link was for goes too.
+            afterLink = null;
+            putLinkBarBack();
+        },
+        onCrash: (error, componentStack) => {
+            logger.error(`Discord's Authorize window crashed and was closed: ${error instanceof Error ? error.message : String(error)}${componentStack}`, error);
+            recordError("link-crash");
+            authorizeWindowBroken = true;
+            void runFallback(null, reserveFallbackTab());
+        }
+    });
+    if (!opened) {
+        // Linking is the way in for everyone: a window that cannot open is
+        // logged and recorded for the feedback box, never silent, and the
+        // browser takes over.
+        logger.error("Discord's Authorize window could not be opened (Vencord did not find it, or opening it failed). Linking in the browser instead.");
+        recordError("link-window");
+        void runFallback(null, reserveFallbackTab());
+    }
+}
+
+/**
+ * The Link bar again, if this Discord account is still not linked. Forced:
+ * the "closed this session" rule never hides the only way in.
+ */
+function putLinkBarBack(): void {
+    if (linkNeeded()) showActivationNotice();
+    showMustLinkBar();
+}
+
+/** The sentence for a link (or a move) the relay did not complete. */
+function linkErrorCopy(res: RelayRefusal | null): string {
+    if (res === null) return LINK_COPY.unreachable;
+    if (res.errorCode === "bad_code" || res.errorCode === "discord_refused") return LINK_COPY.refused;
+    if (res.errorCode === "rate_limited" || res.status === 429) return LINK_COPY.rateLimited;
+    if (res.errorCode === "plan_held") return LINK_COPY.planHeld;
+    if (res.errorCode === "state_expired") return FALLBACK_COPY.expired;
+    return LINK_COPY.unreachable;
+}
+
+/**
+ * Say why a link (or a move) did not complete. Discord authorizing another
+ * account (409 wrong_account) and a plan another computer holds (409
+ * plan_held) are said in a window, which is drawn above Subline's Settings
+ * where a toast is not; the rest go through sayResult (a window while
+ * Settings is on screen, else a short toast).
+ */
+function sayLinkRefusal(res: RelayRefusal | null): void {
+    if (res?.errorCode === "wrong_account") {
+        const name = signedInAccount()?.view.name ?? signedInName();
+        if (!openMessage(LINK_COPY.notice, fill(ACCOUNT_COPY.wrongAccount, { name }))) toast(fill(ACCOUNT_COPY.wrongAccount, { name }), "failure");
+        return;
+    }
+    if (res?.errorCode === "plan_held") {
+        if (!openMessage(LINK_COPY.notice, LINK_COPY.planHeld)) toast(LINK_COPY.planHeld, "failure");
+        return;
+    }
+    sayResult(linkErrorCopy(res), "failure");
+}
+
+async function finishLink(code: string, silent = false): Promise<void> {
+    if (linkBusy) return;
+    const me = signedInAccount();
+    if (me === null) {
+        // Nothing can be named, so nothing is sent: the relay would bind nobody.
+        sayResult(LINK_COPY.noAccount, "failure");
+        afterLink = null;
+        if (silent) silentRunningFor = null;
+        putLinkBarBack();
+        return;
+    }
+    linkBusy = true;
+    const epoch = accountEpoch;
+    const session = statusSession;
+    const account = currentAccount!;
+    let sentOn: string | null = null;
+    try {
+        let res: Awaited<ReturnType<typeof transport.relayLink>> | null;
+        let sent = "";
+        let install = "";
+        try {
+            const creds = await relayCredentials();
+            install = creds.install;
+            if (creds.credential !== creds.install) sent = creds.credential;
+            sentOn = await notePendingFor(account, creds.install);
+            if (epoch !== accountEpoch || session !== statusSession) return;
+            res = await transport.relayLink(creds.credential, creds.install, code, me.id);
+        } catch {
+            res = null;
+        }
+        // Signed in as someone else meanwhile (or stopped): this link was not
+        // theirs. Linked all the same: the install id from before is the
+        // sender's now (account.ts rule 2).
+        if (epoch !== accountEpoch || session !== statusSession) {
+            if (sentOn !== null && res !== null && res.ok && res.linked === true) await bindAfterLink(account, sentOn);
+            return;
+        }
+        if (res === null || !res.ok || res.linked !== true) {
+            logger.warn(`Linking the Discord account did not complete (${res === null ? "no answer" : res.ok ? "not linked" : res.errorCode ?? res.error}).`);
+            afterLink = null;
+            afterUnansweredLink(account, sentOn, res);
+            sayLinkRefusal(res !== null && !res.ok ? res : null);
+            return;
+        }
+        await takeLinkAnswer(res, sent, install, silent);
+    } finally {
+        linkBusy = false;
+        if (silent) silentRunningFor = null;
+        // A link that did not complete: the bar back (Discord took it down at the press).
+        putLinkBarBack();
+    }
+}
+
+/**
+ * A link (or a move) the relay completed: take its answer like a status
+ * answer, bind the install id from before to this account when it was on it
+ * (account.ts rule 2), remember the account's name here, and carry on with
+ * what the link was for.
+ */
+async function takeLinkAnswer(
+    res: Extract<Awaited<ReturnType<typeof transport.relayLink>>, { ok: true; }>, sent: string, install: string, silent: boolean
+): Promise<void> {
+    const account = currentAccount;
+    // A purchase started here before 0.2.8 and still on its way (said before
+    // this answer replaces it): it was paid, so no Buy panel is pushed.
+    const purchaseOnItsWay = purchaseStartedHere();
+    // Linked, but the saved code was left out (it is another Discord
+    // account's, or another computer holds its plan): drop it now, as a
+    // status 409 would, or Buy would send it and be refused. A code this
+    // account moved away itself (Move my plan) goes quietly.
+    const refused = res.codeRefused !== undefined && sent !== "" && sent === savedCode() ? res.codeRefused : null;
+    if (refused !== null) dropRefusedCode(refused);
+    takeStatusAnswer(res, false);
+    // The install id from before is this account's from now on; every other
+    // account here gets its own. Only for the id this link was sent with.
+    const legacyId = knownInstallId();
+    if (account !== null && currentLegacy && legacyId !== null && tasteBearer(legacyId) === install) await bindAfterLink(account, legacyId);
+    rememberCurrentAccount();
+    const name = signedInName();
+    if (name !== "" && res.moved !== true) toast(LINK_COPY.linked.replace("{name}", name), "success");
+    if (refused !== null && res.codeMoved !== true) sayResult(refused === "code_in_use" ? UPGRADE_COPY.codeInUse : UPGRADE_COPY.codeOnOtherAccount, "failure");
+    // What the link was for (Add AI, a code), on this same account.
+    const after = afterLink;
+    afterLink = null;
+    if (after !== null && after.account === currentAccount) {
+        confirmedFor = { account: after.account, until: Date.now() + CONFIRM_CARRIES_MS };
+        after.run();
+        return;
+    }
+    // Linked, and nothing on the account yet: Buy Automatic or Enter a code.
+    // Linked by itself, or with a purchase from before still on its way (it
+    // lands with a later status): the Activate notice, never a panel nobody
+    // asked for. Its Activate sells nothing twice (relay purchase_pending).
+    if (!activated() && res.moved !== true) {
+        if (silent || purchaseOnItsWay) showActivationNotice();
+        else openUpgradeForLevel();
+    }
+}
+
+/**
+ * THE PENDING BIND (account.ts rule 3). A link (or a move) sent on the
+ * install id from before while no binding here is known to be this
+ * account's: the sender is written down first, so an answer that never
+ * arrives (a timeout, the network, a switch) still binds the right account
+ * when a later status answer says linked. Returns that id, or null.
+ */
+function unboundLegacyId(): string | null {
+    if (!currentLegacy || legacyOwned || currentAccount === null) return null;
+    return knownInstallId();
+}
+
+async function notePendingFor(account: string, install: string): Promise<string | null> {
+    const legacyId = unboundLegacyId();
+    if (legacyId === null || tasteBearer(legacyId) !== install) return null;
+    if (!(await notePendingBind(account, legacyId))) logger.warn("Could not write down which account this link is for. Sent all the same: a lost answer then binds no account here.");
+    return legacyId;
+}
+
+/** Refusals the relay gives before it writes anything: that send linked nothing. */
+const LINK_WROTE_NOTHING: readonly string[] = ["wrong_account", "plan_held", "bad_code", "bad_expect", "discord_refused", "rate_limited", "state_expired"];
+
+/**
+ * A link (or a move) sent on the unbound id from before did not come back
+ * linked. A refusal that wrote nothing takes the sender off the pending
+ * bind. Anything else may have linked at the relay (no answer, a 503): the
+ * relay is asked at once, and an answer that says linked binds the sender.
+ */
+function afterUnansweredLink(account: string, sentOn: string | null, res: RelayRefusal | { ok: true; } | null): void {
+    if (sentOn === null) return;
+    if (res !== null && !res.ok && res.errorCode !== undefined && LINK_WROTE_NOTHING.includes(res.errorCode)) {
+        void dropPendingBind(account, sentOn);
+        return;
+    }
+    void refreshEntitlement();
+}
+
+/**
+ * The relay linked the install id from before to `account` (its own
+ * confirmed link): bind it (account.ts rule 2). When another account is
+ * signed in by now and still on that id, it gets an id of its own.
+ */
+async function bindAfterLink(account: string, legacyId: string): Promise<void> {
+    if (!(await bindLegacyInstall(account, legacyId, { relaySaid: true }))) {
+        logger.warn("Linked, but this computer could not record which account the install id from before belongs to. It holds for this session.");
+    }
+    if (currentAccount === account && currentLegacy) {
+        legacyOwned = true;
+        return;
+    }
+    if (currentAccount !== null && currentLegacy && knownInstallId() === legacyId) refollowAccount(currentAccount);
+}
+
+/**
+ * A status answer says linked while this account uses the install id from
+ * before and no binding here is known to be its own. That answer has no
+ * account in it, so account.ts settles whose the id is (rule 3). True: this
+ * account's, take the answer. False: another account's (or nobody's here),
+ * so the answer is not this account's plan; it is left, and the account
+ * gets an id of its own.
+ */
+async function linkedLegacyIsMine(): Promise<boolean> {
+    const legacyId = unboundLegacyId();
+    const account = currentAccount;
+    if (legacyId === null || account === null) return true;
+    const epoch = accountEpoch;
+    const owner = await settleLegacyLink(legacyId);
+    if (epoch !== accountEpoch) return false;
+    if (owner === account) {
+        legacyOwned = true;
+        return true;
+    }
+    logger.info(owner === NOBODY
+        ? "The install id from before was linked, and no single account here sent that link. Every account here gets an id of its own."
+        : "The install id from before is another Discord account's on this computer. This account gets an id of its own.");
+    refollowAccount(account);
+    return false;
+}
+
+/* ------------------------------------------- linking in the browser -- */
+
+/** True while the browser fallback waits, so a second press does not start another. */
+let fallbackRunning = false;
+/**
+ * Discord's Authorize window threw this session. Every later Link goes to the
+ * browser at once, inside its click: a window that crashes again would only
+ * lose the click a browser needs to open a tab.
+ */
+let authorizeWindowBroken = false;
+
+/**
+ * For the release test sheet only (docs/RELEASE-TESTS-0.2.8.md): typed in
+ * the console as `sublineUseBrowserLink()` while Subline runs, it makes this
+ * session's Link use the Authorize fallback in the browser, as after
+ * Discord's Authorize window crashed. Nothing is stored, nothing else
+ * changes, and a restart undoes it. Never called by Subline itself. Put on
+ * the page at start and taken off at stop.
+ */
+export const BROWSER_LINK_SWITCH = "sublineUseBrowserLink";
+function useBrowserLinkForTest(): void {
+    authorizeWindowBroken = true;
+}
+
+/**
+ * In a browser (the add-on), a tab for Discord's authorize page, opened blank
+ * now, inside the click (checkout.ts ReservedTab). Undefined on the desktop,
+ * where openExternal always opens.
+ */
+function reserveFallbackTab(): ReservedTab | null | undefined {
+    if (isDesktop()) return undefined;
+    return reserveTab((globalThis as any).open?.bind(globalThis));
+}
+
+/**
+ * THE AUTHORIZE FALLBACK (linkFallback.ts): Discord's authorize page in the
+ * browser, polled for up to 5 minutes. `ticket` finishes a move instead of a
+ * plain link. The same account check applies (`expect`): a browser signed
+ * in to another Discord account changes nothing.
+ */
+async function runFallback(ticket: string | null, tab: ReservedTab | null | undefined): Promise<void> {
+    if (fallbackRunning || linkBusy) {
+        tab?.close();
+        return;
+    }
+    const me = signedInAccount();
+    if (me === null) {
+        tab?.close();
+        sayResult(LINK_COPY.noAccount, "failure");
+        return;
+    }
+    fallbackRunning = true;
+    linkBusy = true;
+    const epoch = accountEpoch;
+    const session = statusSession;
+    const account = currentAccount!;
+    try {
+        const creds = await relayCredentials();
+        const sent = creds.credential !== creds.install ? creds.credential : "";
+        // Written down before the first poll (account.ts rule 3).
+        const sentOn = await notePendingFor(account, creds.install);
+        if (epoch !== accountEpoch || session !== statusSession) {
+            tab?.close();
+            return;
+        }
+        const result = await runBrowserLink({
+            poll: (state, pair) => transport.relayLinkPoll(creds.credential, creds.install, state, me.id, pair, ticket ?? undefined),
+            open: async url => {
+                if (tab === null) return false;
+                if (tab !== undefined) {
+                    tab.go(url);
+                } else {
+                    const open = (globalThis as any).VencordNative?.native?.openExternal;
+                    if (typeof open !== "function") return false;
+                    await Promise.resolve(open(url));
+                }
+                toast(FALLBACK_COPY.opened, "info");
+                return true;
+            },
+            askPair: triesLeft => askPairCode(triesLeft),
+            alive: () => epoch === accountEpoch && session === statusSession,
+            log: tasteLog
+        });
+        // Signed in as someone else meanwhile (or stopped): nothing is shown
+        // to the account signed in now. A link (or move) the relay finished
+        // all the same (runBrowserLink hands it back) binds the sender, as in
+        // finishLink, and a move's used ticket goes.
+        if (epoch !== accountEpoch || session !== statusSession) {
+            if (result.kind === "linked") await settleFinishedElsewhere(account, sentOn, ticket);
+            return;
+        }
+        if (result.kind !== "linked") {
+            tab?.close();
+            afterUnansweredLink(account, sentOn, result.kind === "refused" ? result.answer : null);
+        }
+        switch (result.kind) {
+            case "linked":
+                if (ticket !== null) await takeMoveAnswer(result.answer, creds.install);
+                else await takeLinkAnswer(result.answer, sent, creds.install, false);
+                break;
+            case "refused":
+                logger.warn(`Linking in the browser did not complete (${result.answer.errorCode ?? result.answer.error}).`);
+                afterLink = null;
+                if (ticket !== null) sayMoveRefusal(result.answer);
+                else sayLinkRefusal(result.answer);
+                break;
+            case "timeout":
+                afterLink = null;
+                sayResult(FALLBACK_COPY.timeout, "failure");
+                break;
+            case "blocked":
+                afterLink = null;
+                sayResult(isDesktop() ? LINK_COPY.windowFailed : FALLBACK_COPY.blocked, "failure");
+                break;
+            case "cancelled":
+                afterLink = null;
+                break;
+        }
+    } catch (err) {
+        tab?.close();
+        logger.warn("Linking in the browser stopped.", err);
+        afterLink = null;
+    } finally {
+        fallbackRunning = false;
+        linkBusy = false;
+        putLinkBarBack();
+    }
+}
+
+/* -------------------------------------------------------- move my plan -- */
+
+/**
+ * MOVE MY PLAN (0.2.8 spec, decision 5). On the account that holds the plan
+ * (a linked computer of it): Settings → "Move my plan to another Discord
+ * account" → what a move does → Start (POST /v1/move/start: a one-time
+ * ticket, 10 minutes). The reader switches accounts in Discord; on the new
+ * account a window names both accounts ("Move to @alt"), and its Authorize
+ * finishes the move (POST /v1/move/finish). The ticket is kept in this
+ * computer's DataStore with the old account's local key and name, so a
+ * switch that reloads Discord still finds it. Nothing moves without both the
+ * Start on the old account and the confirm and Authorize on the new one.
+ */
+export const MOVE_TICKET_KEY = "VcTranslate_moveTicket";
+interface MoveTicket { ticket: string; expiresAt: number; from: string; fromName: string; }
+const MOVE_TICKET_MS = 10 * 60_000;
+let moveTicket: MoveTicket | null = null;
+/** The account the move window was last shown to, so a reconnect does not show it twice. */
+let moveOfferedTo: string | null = null;
+
+function parseMoveTicket(raw: unknown): MoveTicket | null {
+    if (!raw || typeof raw !== "object") return null;
+    const o = raw as Partial<MoveTicket>;
+    if (typeof o.ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(o.ticket)) return null;
+    if (typeof o.expiresAt !== "number" || !Number.isFinite(o.expiresAt)) return null;
+    if (typeof o.from !== "string" || typeof o.fromName !== "string" || o.fromName === "") return null;
+    return { ticket: o.ticket, expiresAt: o.expiresAt, from: o.from, fromName: o.fromName };
+}
+
+async function loadMoveTicket(): Promise<MoveTicket | null> {
+    if (moveTicket === null) {
+        try {
+            moveTicket = parseMoveTicket(await DataStore.get<unknown>(MOVE_TICKET_KEY));
+        } catch {
+            moveTicket = null;
+        }
+    }
+    if (moveTicket !== null && Date.now() >= moveTicket.expiresAt) clearMoveTicket();
+    return moveTicket;
+}
+
+function saveMoveTicket(t: MoveTicket): void {
+    moveTicket = t;
+    moveOfferedTo = null;
+    void DataStore.set(MOVE_TICKET_KEY, t).catch(() => { });
+}
+
+function clearMoveTicket(): void {
+    moveTicket = null;
+    moveOfferedTo = null;
+    void DataStore.set(MOVE_TICKET_KEY, undefined).catch(() => { });
+}
+
+/** Settings → Plan: shown on a linked computer of the account that has the plan. */
+function canMovePlan(): boolean {
+    return linkState() === "linked" && activated() && !mustLink();
+}
+
+/** The sentence for a move the relay refused. */
+function moveErrorCopy(res: RelayRefusal | null): string {
+    switch (res?.errorCode) {
+        case "move_too_soon": return res.until !== undefined ? fill(MOVE_COPY.tooSoon, { date: moveDate(res.until) }) : MOVE_COPY.tooSoon.replace(" on {date}", " later");
+        case "ticket_expired": return MOVE_COPY.expired;
+        case "same_account": return MOVE_COPY.sameAccount;
+        case "no_plan": return MOVE_COPY.noPlan;
+        case "account_too_new": return MOVE_COPY.tooNew;
+        case "move_busy": return MOVE_COPY.busy;
+        case "not_linked": return UPGRADE_COPY.notLinked;
+        case "wrong_account": return fill(ACCOUNT_COPY.wrongAccount, { name: signedInAccount()?.view.name ?? signedInName() });
+        default: return linkErrorCopy(res);
+    }
+}
+
+/** Refusals after which the same ticket cannot work: it is dropped. */
+const MOVE_FINAL: readonly string[] = ["ticket_expired", "same_account", "no_plan", "account_too_new", "move_too_soon"];
+
+function sayMoveRefusal(res: RelayRefusal | null): void {
+    if (res?.errorCode !== undefined && MOVE_FINAL.includes(res.errorCode)) clearMoveTicket();
+    // The same ticket can still finish it: the window is offered again on the next visit.
+    else moveOfferedTo = null;
+    const text = moveErrorCopy(res);
+    if (!openMessage(MOVE_COPY.startTitle, text)) toast(text, "failure");
+}
+
+/** Settings → "Move my plan to another Discord account". */
+function startMove(): void {
+    const me = signedInAccount();
+    if (me === null) {
+        sayResult(LINK_COPY.noAccount, "failure");
+        return;
+    }
+    if (!canMovePlan()) return;
+    const from = currentAccount!;
+    const shown = openMoveStart(me.view, async () => {
+        let res: Awaited<ReturnType<typeof transport.relayMoveStart>>;
+        try {
+            const { credential, install } = await relayCredentials();
+            res = await transport.relayMoveStart(credential, install);
+        } catch {
+            return LINK_COPY.unreachable;
+        }
+        if (!res.ok) return moveErrorCopy(res);
+        // Signed in as someone else meanwhile: the move is still this account's to start again.
+        if (currentAccount !== from) return LINK_COPY.unreachable;
+        // The relay keeps the ticket 10 minutes; counted here on this
+        // computer's own clock (the relay's expiresAt is on the relay's, and a
+        // clock running ahead would hide the move on the other account). A
+        // ticket used late is answered ticket_expired, and said.
+        saveMoveTicket({ ticket: res.ticket, expiresAt: Date.now() + MOVE_TICKET_MS, from, fromName: me.view.name });
+        return null;
+    });
+    if (!shown) sayResult(LINK_COPY.ownWindowFailed, "failure");
+}
+
+/**
+ * On another account, while a move ticket waits: the window that names both
+ * accounts. "Move to @alt" opens Discord's Authorize window (or the browser
+ * fallback, with the ticket). Shown by itself once per account per ticket
+ * (again after a try that can be repeated); Subline's Settings offer it for
+ * as long as the ticket waits ("Finish moving your plan here").
+ */
+async function offerMoveHere(): Promise<void> {
+    const epoch = accountEpoch;
+    const t = await loadMoveTicket();
+    if (epoch !== accountEpoch || t === null || currentAccount === null || t.from === currentAccount || moveOfferedTo === currentAccount) return;
+    showMoveHere(t);
+}
+
+function showMoveHere(t: MoveTicket): boolean {
+    const me = signedInAccount();
+    if (me === null) return false;
+    const epoch = accountEpoch;
+    moveOfferedTo = currentAccount;
+    return openMoveHere(t.fromName, me.view, () => {
+        // Signed in as someone else meanwhile: the window never named that account.
+        if (epoch !== accountEpoch) return;
+        authorizeMove(t.ticket);
+    });
+}
+
+/** A move ticket waits for this account (not the one that started it), within its 10 minutes. */
+function canFinishMove(): boolean {
+    const t = moveTicket;
+    return t !== null && Date.now() < t.expiresAt && currentAccount !== null && t.from !== currentAccount && signedInAccount() !== null;
+}
+
+/** Settings → "Finish moving your plan here": the window that names both accounts, again. */
+function finishMoveFromSettings(): void {
+    if (!canFinishMove() || linkBusy) return;
+    if (!showMoveHere(moveTicket!)) sayResult(LINK_COPY.ownWindowFailed, "failure");
+}
+
+/** The new account's Authorize for a move: the window inside Discord, else the browser. */
+function authorizeMove(ticket: string): void {
+    if (linkBusy) return;
+    if (authorizeWindowBroken) {
+        void runFallback(ticket, reserveFallbackTab());
+        return;
+    }
+    const opened = openLinkWindow({
+        onCode: code => { void finishMove(ticket, code); },
+        onNoCode: () => sayResult(LINK_COPY.refused, "failure"),
+        // Closed without a code (Cancel, the X, Escape): the window is
+        // offered again on the next visit, and Settings offer it now.
+        onClosed: () => {
+            if (!linkBusy) moveOfferedTo = null;
+        },
+        onCrash: (error, componentStack) => {
+            logger.error(`Discord's Authorize window crashed and was closed: ${error instanceof Error ? error.message : String(error)}${componentStack}`, error);
+            recordError("link-crash");
+            authorizeWindowBroken = true;
+            void runFallback(ticket, reserveFallbackTab());
+        }
+    });
+    if (!opened) {
+        logger.error("Discord's Authorize window could not be opened for a move. Finishing it in the browser instead.");
+        recordError("link-window");
+        void runFallback(ticket, reserveFallbackTab());
+    }
+}
+
+async function finishMove(ticket: string, code: string): Promise<void> {
+    if (linkBusy) return;
+    const me = signedInAccount();
+    if (me === null) {
+        sayResult(LINK_COPY.noAccount, "failure");
+        return;
+    }
+    linkBusy = true;
+    const epoch = accountEpoch;
+    const session = statusSession;
+    const account = currentAccount!;
+    let sentOn: string | null = null;
+    try {
+        let res: Awaited<ReturnType<typeof transport.relayMoveFinish>> | null;
+        let install = "";
+        try {
+            const creds = await relayCredentials();
+            install = creds.install;
+            sentOn = await notePendingFor(account, creds.install);
+            if (epoch !== accountEpoch || session !== statusSession) return;
+            res = await transport.relayMoveFinish(creds.credential, creds.install, ticket, code, me.id);
+        } catch {
+            res = null;
+        }
+        // Signed in as someone else meanwhile: a move the relay finished all
+        // the same binds the sender and uses up the ticket.
+        if (epoch !== accountEpoch || session !== statusSession) {
+            if (res !== null && res.ok && res.linked === true) await settleFinishedElsewhere(account, sentOn, ticket);
+            return;
+        }
+        if (res === null || !res.ok || res.linked !== true) {
+            logger.warn(`The move did not complete (${res === null ? "no answer" : res.ok ? "not linked" : res.errorCode ?? res.error}).`);
+            afterUnansweredLink(account, sentOn, res);
+            sayMoveRefusal(res !== null && !res.ok ? res : null);
+            return;
+        }
+        await takeMoveAnswer(res, install);
+    } finally {
+        linkBusy = false;
+    }
+}
+
+/** The move worked: the plan is this account's. The old account's plan flag here goes off. */
+async function takeMoveAnswer(res: Extract<Awaited<ReturnType<typeof transport.relayMoveFinish>>, { ok: true; }>, install: string): Promise<void> {
+    const t = moveTicket;
+    clearMoveTicket();
+    await takeLinkAnswer({ ...res, moved: true }, "", install, false);
+    if (t !== null) void noteLocalAccount(t.from, { name: t.fromName, plan: false }).then(accounts => { if (accounts !== null) localAccounts = accounts; });
+    const name = signedInName();
+    if (name !== "") toast(fill(MOVE_COPY.done, { name }), "success");
+}
+
+/**
+ * A link or a move the relay finished after the account that sent it was
+ * left (an account switch while its answer was on the way). Nothing is shown
+ * to the account signed in now. The install id from before, if it was sent
+ * on, is the sender's (account.ts rule 2); a move's ticket is used up, and
+ * the old account no longer counts as having the plan here.
+ */
+async function settleFinishedElsewhere(account: string, sentOn: string | null, ticket: string | null): Promise<void> {
+    if (sentOn !== null) await bindAfterLink(account, sentOn);
+    const t = moveTicket;
+    if (ticket === null || t === null || t.ticket !== ticket) return;
+    clearMoveTicket();
+    void noteLocalAccount(t.from, { name: t.fromName, plan: false }).then(accounts => { if (accounts !== null) localAccounts = accounts; });
+}
+
+/* ------------------------------------------------ pay on another device -- */
+
+/**
+ * "Pay on another device" (0.2.8 spec, decision 6): the same checkout the Buy
+ * button opens, made by the relay for this install and account, shown as a
+ * link and a QR code instead of opened here. The purchase is waited for as
+ * for Buy, so Subline switches on here by itself.
+ */
+function payElsewhere(plan: Plan): void {
+    checkoutTarget = plan === "automatic" ? "automatic" : "ai";
+    void getCheckoutFlow().startElsewhere(plan).then(result => {
+        if (typeof result === "object") {
+            if (!openPayElsewhere(result.url)) sayResult(LINK_COPY.ownWindowFailed, "failure");
+            return;
+        }
+        sayCheckoutResult(plan, result);
+    });
+}
+
+/** "Pay on another device" from a buy panel: the account confirm first, as for Buy. */
+function payElsewhereConfirmed(plan: Plan | null): void {
+    if (plan !== null) {
+        withAccountConfirm(() => payElsewhere(plan));
+        return;
+    }
+    // Add AI: which plan first.
+    if (!openElsewherePlanChoice(p => withAccountConfirm(() => payElsewhere(p)))) sayResult(LINK_COPY.ownWindowFailed, "failure");
+}
+
 /**
  * The relay's last answer was the 3-computer limit. Every Activate link then
  * shows that sentence and its GitHub link, never the buy panel: buying again
@@ -710,12 +1895,38 @@ function takeDownCheckingNotice(): void {
 }
 
 /**
- * "Subline is not activated on this computer..." with an Activate button,
+ * "Subline isn't active on this Discord account yet." with an Activate button,
  * once per session (and again only with a different sentence). A notice, not
  * a toast: it stays until dismissed.
  */
 function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): void {
     if (activated()) return;
+    // Not linked: first, once per account, link with no window if this
+    // account already approved Subline elsewhere (its own plan may be there:
+    // case 13). Nothing shows while that runs. Until it answers, nobody here
+    // can say this account has no plan.
+    if (linkNeeded() && startSilentLink()) return;
+    // Another account on this computer linked the plan here (account.ts):
+    // say where it is, with local names only. No buy button is pushed first;
+    // Buy stays in Subline's Settings (0.2.8 spec, "Account switcher").
+    // Never to an account with its own code here: its plan waits only for
+    // its Link, so it gets the Link bar (owner Mac, 2026-10-15).
+    const elsewhere = mustLink() || savedCode() !== "" ? null : planElsewhere(currentAccount, localAccounts);
+    if (elsewhere !== null) {
+        // Not linked: this account may own a plan only its Link can find (it
+        // removed Subline from Authorized Apps, or never approved it on this
+        // Discord), so Link is the button.
+        if (linkNeeded()) putNotice("activation", fill(ACCOUNT_COPY.planElsewhereLink, { name: elsewhere }), LINK_COPY.button, linkFromSettings);
+        else putNotice("activation", fill(ACCOUNT_COPY.planElsewhere, { name: elsewhere }), ACCOUNT_COPY.ok, () => takeNotice("activation"));
+        return;
+    }
+    // Not linked: the Link bar instead. Nothing else can help until then.
+    // Forced: while not linked, the bar is never suppressed by a close earlier
+    // this session (putNotice still never shows it twice).
+    if (linkNeeded()) {
+        putNotice("activation", LINK_COPY.notice, LINK_COPY.button, linkFromSettings, true);
+        return;
+    }
     putNotice("activation", message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
 }
 
@@ -725,7 +1936,7 @@ function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): vo
  */
 function openResetHelp(): void {
     void copyToClipboard(SUPPORT_EMAIL)
-        .then(() => showToast(UPGRADE_COPY.emailCopied, "success"))
+        .then(() => toast(UPGRADE_COPY.emailCopied, "success"))
         .catch(() => { });
 }
 
@@ -771,13 +1982,15 @@ function showAppNotice(): void {
  * can now read it.
  */
 function onEntitlementChanged(): void {
+    // A prior payer still to link: the bar that asks (never a block). Linked: gone.
+    showMustLinkBar();
     if (activated()) takeNotice("activation");
     if (activated()) takeDownCheckingNotice();
     if (fastBatcher === null) return;   // stopped
     // Not while a relay answer is being taken in (a dead code is dropped
     // before the account's answer is stored), and not while a saved code
     // waits for the relay: the answer itself decides which notice is right.
-    if (!activated() && !applyingStatus && savedCode() === "") showActivationNotice();
+    if (!activated() && !applyingStatus && (savedCode() === "" || linkNeeded())) showActivationNotice();
     rebuildBatcher();
     notifyForcedInFlight();
     const open = SelectedChannelStore.getChannelId();
@@ -800,7 +2013,8 @@ function normaliseTargetLangSetting(): void {
     const raw = settings.store.targetLang;
     const code = normalizeTargetLang(raw);
     if (code === null || code === raw) return;
-    settings.store.targetLang = code;
+    // Tidying an old value is not the reader changing the language (prefs.ts).
+    withoutPrefStamp(() => { settings.store.targetLang = code; });
     if (typeof raw === "string") clearLanguage(raw);
 }
 
@@ -863,14 +2077,17 @@ function getCheckoutFlow(): CheckoutFlow {
     if (checkoutFlow !== null) return checkoutFlow;
     checkoutFlow = createCheckoutFlow({
         bearer: async () => tasteBearer(await installIdOnce()),
+        // The static link names only the install: only for one the relay
+        // said is linked to this account (checkout.ts header).
+        staticLinkAllowed: () => linkState() === "linked",
         createCheckout: async (bearer, plan) => {
             const code = savedCode();
-            const res = await Native.relayCheckout(code !== "" ? code : bearer, plan, bearer);
+            const res = await transport.relayCheckout(code !== "" ? code : bearer, plan, bearer);
             return res.ok ? { ok: true, url: res.url } : { ok: false, error: res.error, errorCode: res.errorCode, status: res.status };
         },
         status: async bearer => {
             const code = savedCode();
-            const res = await Native.relayStatus(code !== "" ? code : bearer, bearer);
+            const res = await transport.relayStatus(code !== "" ? code : bearer, bearer);
             if (!res.ok) return { ok: false };
             const before = entitlementLevel();
             const saved = applyStatus(res);
@@ -884,6 +2101,8 @@ function getCheckoutFlow(): CheckoutFlow {
             return { ok: true, purchase: { code: savedCode(), plan: checkoutTarget } };
         },
         openExternal: url => (globalThis as any).VencordNative?.native?.openExternal?.(url),
+        // In a browser the checkout tab opens at the click (checkout.ts ReservedTab).
+        reserveWindow: () => isDesktop() ? undefined : reserveTab((globalThis as any).open?.bind(globalThis)),
         onPurchase: () => true,
         log: tasteLog,
         onPendingChange: onPaymentPendingChange
@@ -992,12 +2211,30 @@ function deadCodeConfirmed(code: string, now: number = Date.now()): boolean {
 }
 
 /**
+ * The owner's off switch (surfaces/guard.tsx isFeatureOff), from a status
+ * answer that states it. Absent or malformed: the last list stays (so does
+ * it when the relay is down, since no answer reaches here). Written only when
+ * it changed. Never throws.
+ */
+function takeOffSwitch(raw: unknown): void {
+    try {
+        const off = offListFrom(raw);
+        if (off === undefined) return;
+        const before = settings.store.remoteOff as unknown;
+        if (Array.isArray(before) && before.join(",") === off.join(",")) return;
+        settings.store.remoteOff = off;
+        if (off.length > 0) logger.info(`switched off for now: ${off.join(", ")}`);
+    } catch { /* the last list stays */ }
+}
+
+/**
  * Take in a good /v1/status answer: the entitlement (v2 relays only), today's
  * ✦ preview count, and any code to save. Returns whether a code was saved.
  * An answer from an older relay (no `automatic` field) changes nothing but a
  * linked purchase: it cannot say what this install owns.
  */
-function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>, { ok: true; }>): boolean {
+function applyStatus(res: Extract<Awaited<ReturnType<typeof transport.relayStatus>>, { ok: true; }>): boolean {
+    takeOffSwitch(res.off);
     // A DEAD code (lapsed, refunded, revoked) is forgotten here and marked as
     // cleared, so the relay's link cannot bring it back, but only on the
     // second dead answer at least an hour after the first (deadCodeConfirmed).
@@ -1035,11 +2272,16 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
     } finally {
         applyingStatus = false;
     }
-    // First strike on a dead code: the answer is left out entirely, so the plan
-    // stored for the code stays as it was until the second dead answer (or a
-    // live one) settles it. A storage lag on the relay must not downgrade a
-    // paying reader for an hour.
-    if (typeof res.automatic === "boolean" && !deadPending) {
+    // First strike on a dead code: the answer is left out when it would LOWER
+    // what is stored, so the plan stored for the code stays as it was until
+    // the second dead answer (or a live one) settles it. A storage lag on the
+    // relay must not downgrade a paying reader for an hour. An answer that
+    // lowers nothing is taken (the code itself still waits): the first dead
+    // sighting can be the link answer itself, and holding the stored "not
+    // linked, nothing owned" kept a paying reader on the Link bar for an hour.
+    const answerLevel: Level = res.ai === true ? "ai" : res.automatic === true ? "automatic" : "none";
+    const holdStored = deadPending && levelRank(answerLevel) < levelRank(entitlementLevel());
+    if (typeof res.automatic === "boolean" && !holdStored) {
         const now = Date.now();
         // CLOCK SKEW. The relay's times are on its clock. A reader's clock
         // that runs a day fast would end Automatic a day early (and one that
@@ -1054,7 +2296,12 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof Native.relayStatus>>
             ...(res.token !== undefined ? { token: res.token } : {}),
             tokenExpiresAt: res.tokenExpiresAt !== undefined ? res.tokenExpiresAt - skew : now + OFFLINE_GRACE_MS,
             checkedAt: now,
-            ...(holder !== null ? { holder } : {})
+            ...(holder !== null ? { holder } : {}),
+            ...(typeof res.linked === "boolean" ? { linked: res.linked } : {}),
+            // A prior payer still to link (0.2.8): its plan works; the bar asks.
+            ...(res.mustLink === true && res.linked === false ? { mustLink: true } : {}),
+            // A purchase started here before 0.2.8, still on its way: a link asks the confirm.
+            ...(res.pendingPurchase === true && res.linked === false ? { pendingPurchase: true } : {})
         });
         noteRelayClock(res.serverNow, now);
         if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
@@ -1113,10 +2360,27 @@ function announcePurchase(): void {
  * an Automatic owner, and nothing for an install that already has AI.
  */
 function openUpgradeForLevel(): void {
+    openUpgradeFor(false);
+}
+
+/** openUpgradeForLevel; `asked`: the relay was just asked (askThenOpenUpgrade), so it is not asked again. */
+function openUpgradeFor(asked: boolean): void {
+    // Not linked: Link first. Buying or a code would only be refused.
+    if (linkNeeded()) {
+        linkFromSettings();
+        return;
+    }
+    // A plan from before, not linked yet (mustLink): the relay sells nothing
+    // until it is linked, and the link binds that plan. The account confirm,
+    // the link, then this again (the confirm covers what follows).
+    if (mustLink()) {
+        startLinkConfirmed(openUpgradeForLevel);
+        return;
+    }
     const level = entitlementLevel();
     if (level === "none" && deviceLimited) {
         // Buying again would not free a computer: the sentence and its link.
-        showToast(UPGRADE_COPY.deviceLimit, "failure");
+        sayResult(UPGRADE_COPY.deviceLimit, "failure");
         // Back on screen if the reader closed it; never a second copy.
         showDeviceLimitNotice(true);
         return;
@@ -1126,48 +2390,119 @@ function openUpgradeForLevel(): void {
         openPaymentPendingPanel();
         return;
     }
-    if (level === "none") {
-        openActivatePanel({ buy: () => startCheckout("automatic"), enterCode: openCodeEntryPanel });
-    } else if (level === "automatic") {
-        openUpgradePanel(plan => startCheckout(plan));
+    // Not known yet whether this account is linked (a first 0.2.8 start the
+    // relay has not answered, an answer from 0.2.7, a code just changed):
+    // ask the relay first. Its answer puts up the Link (not linked) or the
+    // account confirm (a plan from before) instead of a sale, which could
+    // otherwise reach the installer's id every local account shares
+    // (checkout.ts header).
+    if (!asked && level !== "ai" && linkState() === "unknown") {
+        void askThenOpenUpgrade();
+        return;
     }
+    // Every purchase names the account first (withAccountConfirm), inside the
+    // click, so a browser tab can still open for the checkout.
+    if (level === "none") {
+        openActivatePanel({
+            buy: () => withAccountConfirm(() => startCheckout("automatic")),
+            enterCode: openCodeEntryPanel,
+            elsewhere: () => payElsewhereConfirmed("automatic")
+        });
+    } else if (level === "automatic") {
+        openUpgradePanel(plan => withAccountConfirm(() => startCheckout(plan)), () => payElsewhereConfirmed(null));
+    }
+}
+
+/** True while openUpgradeForLevel waits for the relay (a second press asks nothing more). */
+let askingBeforeSale = false;
+
+/**
+ * The relay's answer first, then the panel (or the Link) it calls for. The
+ * relay unreachable: said, and nothing opens. Answered, even with no link
+ * state in it: the panel; the relay itself refuses a purchase for an
+ * account that is not linked (403 not_linked), and the static link never
+ * opens for one (checkout.ts staticLinkAllowed). A switch meanwhile: nothing.
+ */
+async function askThenOpenUpgrade(): Promise<void> {
+    if (askingBeforeSale) return;
+    askingBeforeSale = true;
+    const epoch = accountEpoch;
+    const session = statusSession;
+    let answered = false;
+    try {
+        answered = await refreshEntitlement();
+    } catch {
+        answered = false;
+    } finally {
+        askingBeforeSale = false;
+    }
+    if (epoch !== accountEpoch || session !== statusSession) return;
+    if (answered) openUpgradeFor(true);
+    else sayResult(LINK_COPY.unreachable, "failure");
 }
 
 function startCheckout(plan: Plan): void {
     checkoutTarget = plan === "automatic" ? "automatic" : "ai";
-    void getCheckoutFlow().start(plan).then(result => {
+    void getCheckoutFlow().start(plan).then(result => sayCheckoutResult(plan, result));
+}
+
+/** What a checkout (here or on another device) answered, said once. */
+function sayCheckoutResult(plan: Plan, result: true | false | string): void {
+    {
         if (result === true) {
-            showToast(UPGRADE_COPY.checkoutOpenedToast, "message");
+            toast(UPGRADE_COPY.checkoutOpenedToast, "info");
         } else if (result === "automatic_required") {
-            showToast(UPGRADE_COPY.aiNeedsAutomatic, "failure");
+            sayResult(UPGRADE_COPY.aiNeedsAutomatic, "failure");
         } else if (result === "unavailable") {
-            showToast(UPGRADE_COPY.checkoutUnavailable, "failure");
+            sayResult(UPGRADE_COPY.checkoutUnavailable, "failure");
+        } else if (result === "unreachable") {
+            // The relay could not be reached, and the static link may not
+            // open on an install not known to be linked: nothing opened.
+            sayResult(LINK_COPY.unreachable, "failure");
+        } else if (result === "blocked") {
+            // The browser blocked the checkout tab: nothing was asked or opened.
+            sayResult(UPGRADE_COPY.checkoutBlocked, "failure");
         } else if (result === "already_owned") {
             // Nothing opened. AI owned means a second subscription was refused.
             const message = plan === "automatic" ? UPGRADE_COPY.alreadyAutomatic : UPGRADE_COPY.alreadyAi;
-            showToast(message, "message");
+            sayResult(message, "info");
             void refreshEntitlement();
         } else if (result === "purchase_pending") {
             // Nothing opened: buying again would charge twice. The flow keeps
             // asking the relay, so it switches on by itself when it lands.
-            showToast(UPGRADE_COPY.purchasePending, "message");
+            sayResult(UPGRADE_COPY.purchasePending, "info");
+        } else if (result === "not_linked") {
+            // Nothing opened: the account must be linked first. Asking again
+            // puts the Link bar up.
+            sayResult(UPGRADE_COPY.notLinked, "failure");
+            void refreshEntitlement();
         }
-    });
+    }
 }
 
+/** "Enter a code" from the settings: Link first when the account is not linked. */
+function openCodeEntryOrLink(): void {
+    if (linkNeeded()) linkFromSettings();
+    else if (mustLink()) startLinkConfirmed(openCodeEntryPanel);
+    else openCodeEntryPanel();
+}
+
+/**
+ * The code entry, after the account confirm: a code binds to the account
+ * that is named first, "This plan will belong to @name" (0.2.8, EVERY BIND
+ * NAMES THE ACCOUNT). Confirmed before the entry opens, so a mistyped code is
+ * said in the field and can be typed again, with no second confirm.
+ */
 function openCodeEntryPanel(): void {
+    withAccountConfirm(openCodeEntryConfirmed);
+}
+
+function openCodeEntryConfirmed(): void {
     openCodeEntry(async text => {
         const result = await submitCode(text);
         // The 3-computer limit also gets its notice, which carries the GitHub link.
         if (result === UPGRADE_COPY.deviceLimit) showDeviceLimitNotice();
-        if (result === null || typeof result === "string") return result;
-        return {
-            confirm: async () => {
-                const error = await result.confirm();
-                if (error === UPGRADE_COPY.deviceLimit) showDeviceLimitNotice();
-                return error;
-            }
-        };
+        return result;
     });
 }
 
@@ -1183,6 +2518,10 @@ function redeemErrorCopy(errorCode: string | undefined): string {
         case "rate_limited": return UPGRADE_COPY.codeRateLimited;
         case "net_limited": return UPGRADE_COPY.codeNetLimited;
         case "device_limit": return UPGRADE_COPY.deviceLimit;
+        case "not_linked": return UPGRADE_COPY.notLinked;
+        case "account_too_new": return UPGRADE_COPY.accountTooNew;
+        case "code_on_other_account": return UPGRADE_COPY.codeOnOtherAccount;
+        case "code_in_use": return UPGRADE_COPY.codeInUse;
         default: return UPGRADE_COPY.codeUnreachable;
     }
 }
@@ -1204,16 +2543,44 @@ async function submitCode(typed: string): Promise<CodeSubmitResult> {
         return UPGRADE_COPY.codeUnreachable;
     }
     const promo = text.toUpperCase();
-    if (PROMO_RE.test(promo)) {
-        let res: Awaited<ReturnType<typeof Native.relayRedeem>>;
+    if (PROMO_RE.test(promo)) return redeemPromo(promo, install);
+    // CHECK FIRST, LINK AFTER. A typed code is only checked (x-subline-check:
+    // nothing is linked, no computer slot is used), and linked only when it
+    // owns something. The account it joins was confirmed before the code
+    // entry opened (openCodeEntryPanel), so it is not asked again. A mistyped
+    // code, or someone else's, never takes one of an account's computers.
+    let check: Awaited<ReturnType<typeof transport.relayStatus>>;
+    try {
+        check = await transport.relayStatus(text, install, { check: true });
+    } catch {
+        return UPGRADE_COPY.codeUnreachable;
+    }
+    const refused = statusRefusalCopy(check);
+    if (refused !== null) return refused;
+    if (!check.ok || typeof check.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
+    if (check.linked === false) return notLinkedAnswer();
+    const valid = check.check !== undefined
+        ? check.check.valid && (check.check.automatic || check.check.ai)
+        : check.automatic || check.ai === true;
+    if (!valid) return UPGRADE_COPY.codeNotFound;
+    return linkTypedCode(text, install);
+}
+
+/** A promo code (a server's code): redeem it for this install and save the code the relay mints. */
+async function redeemPromo(promo: string, install: string): Promise<string | null> {
+    {
+        let res: Awaited<ReturnType<typeof transport.relayRedeem>>;
         try {
-            res = await Native.relayRedeem(install, promo);
+            res = await transport.relayRedeem(install, promo);
         } catch {
             return UPGRADE_COPY.codeUnreachable;
         }
+        // Another Discord account signed in meanwhile: not this one's code.
+        if (!stillInstall(install)) return UPGRADE_COPY.codeUnreachable;
         if (!res.ok) {
             // "Already yours": this install owns it already, so ask what it owns.
-            if (res.errorCode === "already") void refreshEntitlement();
+            // Not linked: asking again puts the Link bar up.
+            if (res.errorCode === "already" || res.errorCode === "not_linked") void refreshEntitlement();
             return redeemErrorCopy(res.errorCode);
         }
         adoptCode(res.code);
@@ -1222,44 +2589,44 @@ async function submitCode(typed: string): Promise<CodeSubmitResult> {
         announcePurchase();
         return null;
     }
-    // CHECK FIRST, LINK AFTER. A typed code is only checked (x-subline-check:
-    // nothing is linked, no computer slot is used), and the reader then
-    // confirms it on this computer. A mistyped code, or someone else's, never
-    // takes one of an account's 3 computers.
-    let check: Awaited<ReturnType<typeof Native.relayStatus>>;
-    try {
-        check = await Native.relayStatus(text, install, { check: true });
-    } catch {
-        return UPGRADE_COPY.codeUnreachable;
-    }
-    const refused = statusRefusalCopy(check);
-    if (refused !== null) return refused;
-    if (!check.ok || typeof check.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
-    const valid = check.check !== undefined
-        ? check.check.valid && (check.check.automatic || check.check.ai)
-        : check.automatic || check.ai === true;
-    if (!valid) return UPGRADE_COPY.codeNotFound;
-    return { confirm: () => linkTypedCode(text, install) };
 }
 
 /** The sentence for a status call the relay refused, or null when it did not refuse. */
-function statusRefusalCopy(res: Awaited<ReturnType<typeof Native.relayStatus>>): string | null {
+function statusRefusalCopy(res: Awaited<ReturnType<typeof transport.relayStatus>>): string | null {
     if (res.ok) return null;
     if (res.errorCode === "device_limit") return UPGRADE_COPY.deviceLimit;
+    if (res.errorCode === "code_on_other_account") return UPGRADE_COPY.codeOnOtherAccount;
+    if (res.errorCode === "code_in_use") return UPGRADE_COPY.codeInUse;
+    if (res.errorCode === "not_linked") return notLinkedAnswer();
     return UPGRADE_COPY.codeUnreachable;
+}
+
+/** The relay said "link first" to a code: say so, and ask again (the Link bar follows). */
+function notLinkedAnswer(): string {
+    void refreshEntitlement();
+    return UPGRADE_COPY.notLinked;
+}
+
+/** Is `install` still the signed-in account's install bearer? (A switch may have come in between.) */
+function stillInstall(install: string): boolean {
+    const id = knownInstallId();
+    return id !== null && tasteBearer(id) === install;
 }
 
 /** The reader confirmed a checked code: link it to this computer and save it. */
 async function linkTypedCode(text: string, install: string): Promise<string | null> {
-    let res: Awaited<ReturnType<typeof Native.relayStatus>>;
+    let res: Awaited<ReturnType<typeof transport.relayStatus>>;
     try {
-        res = await Native.relayStatus(text, install);
+        res = await transport.relayStatus(text, install);
     } catch {
         return UPGRADE_COPY.codeUnreachable;
     }
+    // Another Discord account signed in meanwhile: nothing is saved for it.
+    if (!stillInstall(install)) return UPGRADE_COPY.codeUnreachable;
     const refused = statusRefusalCopy(res);
     if (refused !== null) return refused;
     if (!res.ok || typeof res.automatic !== "boolean") return UPGRADE_COPY.codeUnreachable;
+    if (res.linked === false) return notLinkedAnswer();
     if (!res.automatic && res.ai !== true) return UPGRADE_COPY.codeNotFound;
     const before = entitlementLevel();
     // Typed by the reader, so it wins even over a code they once cleared.
@@ -1375,7 +2742,12 @@ function startEntitlementClock(): void {
     entitlementTimer = setInterval(() => entitlementTick(), ENTITLEMENT_TICK_MS);
     try {
         if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
-            entitlementNudge = () => nudgeEntitlement();
+            entitlementNudge = () => {
+                nudgeEntitlement();
+                // The 🌐 choices and settings changed on another computer meanwhile (at most every 10 minutes).
+                channelSyncFocus();
+                prefSyncFocus();
+            };
             window.addEventListener("online", entitlementNudge);
             window.addEventListener("focus", entitlementNudge);
         }
@@ -1421,8 +2793,10 @@ function clearStatusRetry(): void {
  * or put it up. Never awaited by anything the reader is waiting on, except
  * "Enter a code". A relay that cannot be reached leaves the stored answer in
  * charge until it runs out (entitlement.ts), and is asked again soon.
+ * Resolves whether the relay answered (false: unreachable, or this account
+ * was left meanwhile).
  */
-async function refreshEntitlement(): Promise<void> {
+async function refreshEntitlement(): Promise<boolean> {
     const session = statusSession;
     let answered = false;
     lastStatusAskAt = Date.now();
@@ -1432,30 +2806,15 @@ async function refreshEntitlement(): Promise<void> {
         // before 0.2.0 (taste.ts priorUseHint). The relay checks it against
         // its own records; it never trusts it alone.
         const prior = await priorUseHint(settings.store.freeTrialStartedAt);
-        const res = await Native.relayStatus(credential, install, prior ? { prior: true } : undefined);
-        if (session !== statusSession) return;
+        const res = await transport.relayStatus(credential, install, prior ? { prior: true } : undefined);
+        if (session !== statusSession) return false;
+        // Linked, on the install id from before: whose it is first (account.ts rule 3).
+        // Another account's: answered, and this account gets an id of its own.
+        if (res.ok && res.linked === true && !(await linkedLegacyIsMine())) return true;
+        if (session !== statusSession) return false;
         if (res.ok) {
             answered = true;
-            clearStatusRetry();
-            deviceLimited = false;
-            // The hint stops once Automatic is here. A plain automatic:false to
-            // a hinted request is the relay's definitive no: the early-user
-            // check is over and the activation notice follows.
-            if (res.automatic === true) markPriorHintDone();
-            else if (prior && typeof res.automatic === "boolean") endEarlyCheck();
-            takeDownCheckingNotice();
-            const before = entitlementLevel();
-            const saved = applyStatus(res);
-            noteLevelForRenewal(before, entitlementLevel(), Date.now());
-            lastTickLevel = entitlementLevel();
-            if (saved || before !== entitlementLevel()) onEntitlementChanged();
-            else if (!activated()) showActivationNotice();
-            // "You're on." only when this answer RAISED what the install
-            // owns (or granted the early Automatic). Losing AI also adopts a
-            // code (the account's Automatic one), and that reader must not be
-            // told they are on.
-            if ((saved && levelRank(entitlementLevel()) > levelRank(before)) || res.grant === "early") announcePurchase();
-            tasteLog(`the relay says: ${entitlementLevel()}`);
+            takeStatusAnswer(res, prior);
             // A dead code was dropped and nothing replaced it: ask again for
             // this install alone (its bearer is then the install id).
             if (res.deadCode !== undefined && credential !== install && savedCode() === "") void refreshEntitlement();
@@ -1473,6 +2832,18 @@ async function refreshEntitlement(): Promise<void> {
             showDeviceLimitNotice();
             if (before !== "none") onEntitlementChanged();
             tasteLog(`the relay refused this install (${res.errorCode})`);
+        } else if ((res.errorCode === "code_on_other_account" || res.errorCode === "code_in_use") && credential !== install && credential === savedCode()) {
+            // The saved code is linked to ANOTHER Discord account (409), or its
+            // plan is held by another computer that has not linked yet (409
+            // code_in_use, a key shared on 0.2.5): it is not this account's
+            // plan now. It is taken off this account (not as "cleared by hand";
+            // the plan still has it, and the relay hands it back once it is
+            // this account's), and the relay is asked again for this install alone.
+            answered = true;
+            // A key this account moved away itself (Move my plan): no alarm, it simply goes.
+            if (res.moved !== true) sayResult(res.errorCode === "code_in_use" ? UPGRADE_COPY.codeInUse : UPGRADE_COPY.codeOnOtherAccount, "failure");
+            dropRefusedCode(res.errorCode);
+            void refreshEntitlement();
         } else {
             tasteLog(`what this install owns is unknown: ${res.error}`);
             await showUnreachableNotice(prior);
@@ -1482,10 +2853,67 @@ async function refreshEntitlement(): Promise<void> {
         if (session === statusSession) await showUnreachableNotice(await priorUseHint(settings.store.freeTrialStartedAt).catch(() => false));
     }
     if (!answered && session === statusSession) scheduleStatusRetry();
+    return answered;
 }
 
-/** Relay refusals that are about what this install owns, not about the network. */
-const ENTITLEMENT_REFUSAL_CODES: readonly string[] = ["not_activated", "ai_required", "device_limit"];
+/**
+ * The saved code is not this Discord account's plan now (409
+ * code_on_other_account / code_in_use, from a status call or named by a link
+ * answer). It is taken off this account, not as "cleared by hand": the plan
+ * still has it, and the relay hands it back once it is this account's.
+ */
+function dropRefusedCode(why: string): void {
+    logger.warn(`The saved code was taken off this account (${why}).`);
+    lastSeenCode = "";
+    settings.store.sublineCode = "";
+    currentHolderNow();
+}
+
+/**
+ * Take in a good status answer (from /v1/status, or /v1/link, which answers
+ * the same way): what the install owns, the notices, "You're on.".
+ */
+function takeStatusAnswer(res: Extract<Awaited<ReturnType<typeof transport.relayStatus>>, { ok: true; }>, prior: boolean): void {
+    clearStatusRetry();
+    deviceLimited = false;
+    // The hint stops once Automatic is here. A plain automatic:false to
+    // a hinted request is the relay's definitive no: the early-user
+    // check is over and the activation notice follows.
+    if (res.automatic === true) markPriorHintDone();
+    else if (prior && typeof res.automatic === "boolean") endEarlyCheck();
+    takeDownCheckingNotice();
+    const before = entitlementLevel();
+    const saved = applyStatus(res);
+    noteLevelForRenewal(before, entitlementLevel(), Date.now());
+    lastTickLevel = entitlementLevel();
+    if (saved || before !== entitlementLevel()) onEntitlementChanged();
+    else if (!activated()) showActivationNotice();
+    // Not linked (API 3): the Link bar, whatever else this answer changed,
+    // and even with a saved code (it counts for nothing until linked).
+    if (linkNeeded()) showActivationNotice();
+    // A prior payer still to link: the bar that asks. Linked: gone.
+    showMustLinkBar();
+    // Linked: this computer remembers the account's name and plan (local only).
+    rememberCurrentAccount();
+    // Linked: the 🌐 choices follow the account (channelSync.ts). Not linked:
+    // they stay on this computer, exactly as before. The same for Subline's settings.
+    followChannelChoices();
+    followPrefs();
+    // "You're on." only when this answer RAISED what the install
+    // owns (or granted the early Automatic). Losing AI also adopts a
+    // code (the account's Automatic one), and that reader must not be
+    // told they are on.
+    if ((saved && levelRank(entitlementLevel()) > levelRank(before)) || res.grant === "early") announcePurchase();
+    tasteLog(`the relay says: ${entitlementLevel()}, ${linkState()}`);
+}
+
+/**
+ * Relay refusals that are about what this install owns, not about the network.
+ * code_on_other_account / code_in_use: the saved code's plan is now on
+ * another Discord account, or held by another computer; the status answer
+ * that follows takes the code off this one.
+ */
+const ENTITLEMENT_REFUSAL_CODES: readonly string[] = ["not_activated", "ai_required", "device_limit", "not_linked", "code_on_other_account", "code_in_use"];
 function isEntitlementRefusal(code: string | undefined): boolean {
     return code !== undefined && ENTITLEMENT_REFUSAL_CODES.includes(code);
 }
@@ -1827,7 +3255,7 @@ function announceCooldownOnce(
 ): void {
     const { label } = LLM_ENGINES[engine];
 
-    let type: "message" | "failure" = "message";
+    let type: ToastKind = "info";
     let message: string;
 
     if (typeof quotaModel === "string" && quotaModel !== "") {
@@ -1852,7 +3280,7 @@ function announceCooldownOnce(
 
     if (announcedCooldown) return;
     announcedCooldown = true;
-    showToast(message, type);
+    toast(message, type);
 }
 
 /**
@@ -1959,7 +3387,7 @@ function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
     if (kind === "blocked" && settings.store.engine === "relay") {
         logger.info(`${reason}; ✦ paused for ${Math.round(BLOCKED_RETRY_AFTER_MS / 60_000)} minutes`);
     } else {
-        showToast(`${sentenceCase(reason)}. Showing ≈ for now.`, "failure");
+        toast(`${sentenceCase(reason)}. Showing ≈ for now.`, "failure");
     }
     rebuildBatcher();
 }
@@ -1987,7 +3415,7 @@ function announceMissingKeyOnce() {
     if (apiKeyFor(configured).trim() !== "") return;
     announcedMissingKey = true;
     const { credential } = LLM_ENGINES[configured];
-    showToast(`No ${credential} set. Showing ≈ until you add one.`, "failure");
+    toast(`No ${credential} set. Showing ≈ until you add one.`, "failure");
 }
 
 /** A short, human-readable description of a stored entry, for debug logging only. */
@@ -2052,7 +3480,7 @@ function writeResult(key: string, value: StoredTranslation): void {
 function showWeeklyNoteIfDue(): void {
     const note = closeWeekIfDue();
     if (note === null) return;
-    showToast(note, "message");
+    toast(note, "info");
 }
 
 /**
@@ -2379,14 +3807,14 @@ async function runTier(
         // side successfully reported. onFlush is void-returning and invoked
         // un-awaited, so an unhandled rejection here would otherwise just
         // vanish the batch with no marker.
-        let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
+        let res: Awaited<ReturnType<typeof transport.translateBatch>> | null;
         try {
             // The relay is told which install asks (the 3-computer limit).
             const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
-            res = await Native.translateBatch(
+            res = await transport.translateBatch(
                 engine,
                 isLlmEngine(engine) ? apiKeyFor(engine) : "",
-                JSON.stringify(engine === "google" ? withSourceLangs(req) : req),
+                JSON.stringify(engine === "google" ? withSourceLangs(withoutEdgeMentions(req)) : req),
                 modelFor(engine),
                 debug,
                 install
@@ -2663,11 +4091,15 @@ async function runTier(
             // (approximate) instead of claiming ✦. Routed through
             // writeResult(): the two tiers write the same key from different
             // latencies, so this write has to ask whether it is an improvement.
-            const value: StoredTranslation = { lang: r.lang, text: r.text, via: engine, conf: r.conf };
-            writeResult(key, value);
             // Recorded from the SENT text, so the lookup in enqueue() keys on
             // exactly what a later identical message will present.
             const sent = req.messages.find(m => m.id === r.id);
+            // Google was sent the words without the edge mentions (the
+            // mention case): they are put back, as written, around its answer.
+            const edges = isQuality || sent === undefined ? undefined : edgesFor(sent);
+            const text = edges === undefined ? r.text : withEdgeMentions(edges.lead, r.text, edges.trail);
+            const value: StoredTranslation = { lang: r.lang, text, via: engine, conf: r.conf };
+            writeResult(key, value);
             // P7: stored by the same rule it is reused by. A reply's line was
             // read against its parent, so it must never answer a non-reply.
             if (sent !== undefined && phraseReusable(sent)) rememberPhrase(sent.text, req.targetLang, value);
@@ -2811,7 +4243,7 @@ async function runLongMessage(
  * request was chosen, and bypassing either would let one click spend the
  * quota every other message is waiting on, or hammer an engine that just
  * rejected us. Routed through `runTier()` itself — not a second call to
- * `Native.translateBatch` — so the write still lands through
+ * `transport.translateBatch` — so the write still lands through
  * `writeResult()`/`mayReplace()` exactly as an automatic quality batch does:
  * a Google result arriving later still cannot clobber what this bought.
  */
@@ -3056,9 +4488,9 @@ async function sendPreview(message: Message, mySession: number): Promise<boolean
     const requests = split === null ? [{ ...base, messages: [one] }] : fitLlmRequest(split.req);
     const rows = new Map<string, Result>();
     for (const req of requests) {
-        let res: Awaited<ReturnType<typeof Native.translateBatch>> | null;
+        let res: Awaited<ReturnType<typeof transport.translateBatch>> | null;
         try {
-            res = await Native.translateBatch("relay", credential, JSON.stringify(req), undefined, settings.store.debugLogging, install);
+            res = await transport.translateBatch("relay", credential, JSON.stringify(req), undefined, settings.store.debugLogging, install);
         } catch {
             res = null;
         }
@@ -3251,6 +4683,8 @@ function readableContent(text: string, channelId: string): string {
  * paths that decide per call whether the quality tier is in play at all.
  */
 function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, recordContext = true) {
+    // The owner switched message translation off: nothing is queued or sent.
+    if (isFeatureOff("messages")) return;
     // The raw text, before the readable rewrite below, because that is what a
     // later MESSAGE_UPDATE carries and is compared with.
     rememberSeenText(pending.id, pending.text);
@@ -3278,6 +4712,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     // numeric id, so this cannot change whether a message is enqueued, only
     // what text it carries once it is.
     const readable = readableContent(pending.text, pending.channelId);
+    rememberEdgeMentions(pending.id, pending.text, pending.channelId, readable);
     if (readable !== pending.text) pending = { ...pending, text: readable };
 
     // P6 (field test 2026-10-08): EVERY message the reader sees is
@@ -3410,6 +4845,76 @@ function languageName(code: string): string {
     } catch {
         return code;
     }
+}
+
+/* ---------------------------------------------------- the mention case -- */
+
+/**
+ * THE MENTION CASE (0.2.8, see mentionEdges.ts). Per message id, the words
+ * Google is sent instead of the whole readable text, and the readable edge
+ * mentions put back around its answer. `full` is the readable text this was
+ * worked out for: a request carrying any other text (an edit) is sent whole.
+ * Bounded: the oldest ids go first.
+ */
+const edgeMentions = new Map<string, { full: string; core: string; lead: string; trail: string; }>();
+export const MAX_EDGE_MENTIONS = 2_000;
+
+function rememberEdgeMentions(id: string, raw: string, channelId: string, readable: string): void {
+    edgeMentions.delete(id);
+    try {
+        // A message written in a code is judged decoded, whole (decode.ts).
+        if (decodeMessage(raw) !== null) return;
+        const split = splitEdgeMentions(raw);
+        if (split === null) return;
+        const core = readableContent(split.core, channelId).trim();
+        if (core === "" || core === readable.trim()) return;
+        edgeMentions.set(id, {
+            full: readable,
+            core,
+            lead: split.lead === "" ? "" : readableContent(split.lead, channelId),
+            trail: split.trail === "" ? "" : readableContent(split.trail, channelId)
+        });
+        while (edgeMentions.size > MAX_EDGE_MENTIONS) {
+            const oldest = edgeMentions.keys().next();
+            if (oldest.done) break;
+            edgeMentions.delete(oldest.value);
+        }
+    } catch {
+        // Judged whole, as before.
+        edgeMentions.delete(id);
+    }
+}
+
+/** For tests: the message ids with remembered edge mentions, oldest first. */
+export function __edgeMentionIds(): string[] {
+    return [...edgeMentions.keys()];
+}
+
+/**
+ * The edge mentions of a message as it was sent, if Google got its words
+ * alone. The `full` check is defence in depth: every enqueue (an edit too)
+ * works the entry out again before its text can be sent, so a request whose
+ * text differs from the entry's is not reachable today; if it ever is, that
+ * request is sent whole rather than with another text's words.
+ */
+function edgesFor(m: { id: string; text: string; }) {
+    const e = edgeMentions.get(m.id);
+    return e !== undefined && e.full === m.text ? e : undefined;
+}
+
+/**
+ * Google's request: each message with edge mentions carries its own words
+ * only, so the language check (and the short-reply borrow in
+ * withSourceLangs) judges the words, never the names.
+ */
+function withoutEdgeMentions(req: BatchRequest): BatchRequest {
+    return {
+        ...req,
+        messages: req.messages.map(m => {
+            const e = edgesFor(m);
+            return e === undefined ? m : { ...m, text: e.core };
+        })
+    };
 }
 
 /**
@@ -3835,6 +5340,8 @@ function onChannelSelect({ channelId }: { channelId: string; }) {
     // This event IS the focus change, so it does not have to ask
     // SelectedChannelStore whether it has caught up yet.
     catchUp(channelId, { becomingFocused: true });
+    // A 🌐 choice made on another computer for a channel not known here until now.
+    void channelOpened(channelId);
 }
 
 // CHANNEL_SELECT fires before Discord has necessarily fetched the backlog
@@ -4023,12 +5530,16 @@ function TranslationAccessory({ message }: { message: Message; }) {
         // must re-render this message's accessory.
         const unsubStore = subscribe(forceUpdate);
         const unsubForced = subscribeForcedInFlight(forceUpdate);
+        // A channel switched on or off (here, or on another computer).
+        const unsubChannels = subscribeChannels(forceUpdate);
         return () => {
             unsubStore();
             unsubForced();
+            unsubChannels();
         };
     }, []);
 
+    if (isFeatureOff("messages")) return null;
     if (!channelActive(message.channel_id)) return null;
     return withDecodedLine(message, translationLines(message));
 }
@@ -4326,6 +5837,17 @@ export const FORCE_QUALITY_POPOVER_ID = "VcTranslate-forceQuality";
 /** The 🌐 popover button: on is the globe, off the same globe dimmed (P2). */
 const CHANNEL_ICON_ON = { fontSize: "1rem" } as const;
 const CHANNEL_ICON_OFF = { fontSize: "1rem", opacity: 0.4, filter: "grayscale(1)" } as const;
+/**
+ * The 🌐 itself: on is the globe, off the same globe dimmed. It follows the
+ * lists as they change (a click here, or a choice made on another computer
+ * of the same account), not only when the popover is drawn again.
+ */
+function ChannelGlobe({ channelId }: { channelId: string; }) {
+    const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => subscribeChannels(forceUpdate), []);
+    const on = channelActive(channelId);
+    return <span style={on ? CHANNEL_ICON_ON : CHANNEL_ICON_OFF} data-subline-channel-icon={on ? "on" : "off"}>🌐</span>;
+}
 /** The toast when the 🌐 switch could not be saved. */
 const CHANNEL_TOGGLE_FAILED = "Couldn't save that. Try again.";
 
@@ -4641,6 +6163,17 @@ function isPaidSurfaceUser(): boolean {
     return activated();
 }
 
+/**
+ * Names and pronouns (0.2.8): any plan, Automatic or AI, with the "Names and
+ * pronouns" setting on. Its own setting, not the surfaces one. Nothing at all
+ * without a plan.
+ */
+function isNamesUser(): boolean {
+    if (surfaceService === null) return false;
+    if (settings.store.translateNames === false) return false;
+    return activated();
+}
+
 /** Whether surfaces may ask the relay (✦): only with AI and a working relay tier. */
 function surfaceQualityAllowed(): boolean {
     return effectiveEngine() === "relay";
@@ -4657,7 +6190,7 @@ function surfaceDebug(message: string): void {
  * requests). Any refusal is quiet: `null` ("not now") and the cooldown the
  * message pipeline would also have recorded. Never a toast.
  */
-async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promise<SurfaceOutcome> {
+async function translateSurfaceBatch(tier: SurfaceTier, texts: string[], options?: SurfaceSendOptions): Promise<SurfaceOutcome> {
     const engine: EngineId = tier === "fast" ? "google" : "relay";
     // A Google cooldown pauses every surface: whatever capacity is left then
     // belongs to the conversation. A relay cooldown pauses ✦ only. ≈ goes on
@@ -4666,7 +6199,7 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
     // "busy" for every refusal BEFORE anything is sent: it costs the
     // surfaces no per-minute slot and is asked again in seconds (see
     // SurfaceOutcome). `null` is kept for a request that went out.
-    if (!isPaidSurfaceUser() || isCoolingDown("google") || (engine === "relay" && isCoolingDown("relay"))) return "busy";
+    if ((!isPaidSurfaceUser() && !isNamesUser()) || isCoolingDown("google") || (engine === "relay" && isCoolingDown("relay"))) return "busy";
     // Surfaces' OWN Google cooldown: a 429 on a burst of statuses must never
     // park the ≈ line under messages (see the 429 branch below).
     if (engine === "google" && Date.now() < surfaceGoogleCooldownUntil) return "busy";
@@ -4683,13 +6216,15 @@ async function translateSurfaceBatch(tier: SurfaceTier, texts: string[]): Promis
         messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text: dropCustomEmoji(text) })),
         context: [],
         targetLang: settings.store.targetLang,
-        ...(engine === "google" ? { maxConcurrency: 1 } : {})
+        ...(engine === "google" ? { maxConcurrency: 1 } : {}),
+        // A ✦ click on a name: the relay translates it, never skips it.
+        ...(engine === "relay" && options?.force === true ? { force: true as const } : {})
     };
     if (engine === "relay" && !surfaceQualityAllowed()) return "busy";
-    let res: Awaited<ReturnType<typeof Native.translateBatch>>;
+    let res: Awaited<ReturnType<typeof transport.translateBatch>>;
     try {
         const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
-        res = await Native.translateBatch(
+        res = await transport.translateBatch(
             engine,
             engine === "relay" ? apiKeyFor("relay") : "",
             JSON.stringify(req),
@@ -4758,6 +6293,7 @@ function startSurfaces(): SurfaceService {
     );
     surfaceService = new SurfaceService({
         isPaid: isPaidSurfaceUser,
+        namesAllowed: isNamesUser,
         qualityAllowed: surfaceQualityAllowed,
         qualityPaused: () => relayFailing || isCoolingDown("relay"),
         targetLang: () => settings.store.targetLang,
@@ -4782,7 +6318,7 @@ export function __surfaceService(): SurfaceService | null {
 
 /** Embeds, polls and forwards of one message, as small lines under it. */
 function SurfaceAccessoryImpl({ message }: { message: Message; }) {
-    if (!isPaidSurfaceUser() || message == null) return null;
+    if (isFeatureOff("messages") || !isPaidSurfaceUser() || message == null) return null;
     const channelId = (message as any).channel_id as string;
     // THE SAME RULE AS MESSAGES. A DM, a group DM, or a channel the reader
     // switched off sends nothing, embeds and polls included. A DM the reader
@@ -4866,33 +6402,30 @@ function parserStateAllowed(parser: string, state: unknown): boolean {
  * a paid install and a foreign text in a channel that translates messages, a
  * small line after it (roomy) or the translation in its place once ✦ has it
  * (tight: the header topic, voice status). Anything else returns Discord's
- * output exactly as made.
+ * output exactly as made. Called only through its crash guard (wrapParser):
+ * a throw here gives Discord's output and is reported.
  */
 export function decorateParsed(parser: string, args: unknown[], out: unknown, reparse?: (text: string) => unknown): unknown {
-    try {
-        const source = args[0];
-        if (!isPaidSurfaceUser() || typeof source !== "string" || source.trim() === "") return out;
-        const spec = PARSER_SURFACES[parser];
-        if (spec === undefined) return out;
-        if (spec.guildOnly && !parserStateAllowed(parser, args[2])) return out;
-        // What goes to the relay is the READABLE text: mentions as names,
-        // custom emoji as :name:. Never raw <#id>, <@id> or <:name:id> tokens.
-        const channelId = (args[2] as { channelId?: unknown } | null | undefined)?.channelId;
-        const markup = markupFor(source, typeof channelId === "string" ? channelId : null);
-        const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: markup.readable }];
-        if (!spec.tight) return [out, <SurfaceLines key="subline-surface" texts={texts} />];
-        return (
-            <TightSwap
-                key="subline-surface"
-                original={out}
-                text={markup.readable}
-                tooltip={markup.readable}
-                render={translation => renderWithMarkup(translation, markup.tokens, reparse, source)}
-            />
-        );
-    } catch {
-        return out;
-    }
+    const source = args[0];
+    if (!isPaidSurfaceUser() || typeof source !== "string" || source.trim() === "") return out;
+    const spec = PARSER_SURFACES[parser];
+    if (spec === undefined) return out;
+    if (spec.guildOnly && !parserStateAllowed(parser, args[2])) return out;
+    // What goes to the relay is the READABLE text: mentions as names,
+    // custom emoji as :name:. Never raw <#id>, <@id> or <:name:id> tokens.
+    const channelId = (args[2] as { channelId?: unknown } | null | undefined)?.channelId;
+    const markup = markupFor(source, typeof channelId === "string" ? channelId : null);
+    const texts: SurfaceText[] = [{ kind: spec.kind, label: spec.label, text: markup.readable }];
+    if (!spec.tight) return [out, <SurfaceLines key="subline-surface" texts={texts} />];
+    return (
+        <TightSwap
+            key="subline-surface"
+            original={out}
+            text={markup.readable}
+            tooltip={markup.readable}
+            render={translation => renderWithMarkup(translation, markup.tokens, reparse, source)}
+        />
+    );
 }
 
 /** Raw Discord tokens: a custom emoji, a channel, role or user mention. */
@@ -4937,31 +6470,44 @@ function renderWithMarkup(translation: string, tokens: Array<[string, string]>, 
     }
 }
 
+/** Each wrapped parser's feature, for the owner's off switch. */
+const PARSER_FEATURES: Readonly<Record<string, FeatureId>> = {
+    "topic": "topic", "topic-truncated": "topic", "voice-status": "voice-status", "rule": "rules", "guidelines": "guidelines", "event": "event"
+};
+
+/** decorateParsed, crash-guarded: Discord's own output on a throw or with the feature off. */
+const decorateGuarded = guard(
+    "wrapParser",
+    (args: [string, unknown[], unknown, ((text: string) => unknown)?]) => args[2],
+    (...args) => PARSER_FEATURES[args[0]] ?? null,
+    decorateParsed
+);
+
 /**
  * Wrap one of Discord's parser functions. Runs when Discord loads the parser
- * module, so it must never throw: anything but a function is returned as is.
+ * module, so it must never throw (its guard hands back `fn`): anything but a
+ * function is returned as is. Discord's own parse runs OUTSIDE the guard, so
+ * a throw of Discord's stays Discord's; only Subline's part is guarded.
  */
 function wrapParser(parser: string, fn: unknown): unknown {
     if (typeof fn !== "function") return fn;
     const original = fn as (...args: unknown[]) => unknown;
     return function (this: unknown, ...args: unknown[]) {
         const self = this;
-        return decorateParsed(
-            parser, args, original.apply(self, args),
+        const out = original.apply(self, args);
+        return decorateGuarded(
+            parser, args, out,
             // The same parser, with the same state, for the translation.
             text => original.apply(self, [text, ...args.slice(1)])
         );
     };
 }
 
+/** Called only through a crash guard (stageTopicProps, threadTitleProps): a throw gives `{ children: text }`. */
 function overflowProps(text: unknown, channel: unknown): Record<string, unknown> {
-    try {
-        const children = tightChildren(text, text, channel);
-        if (children === text || typeof text !== "string") return { children: text };
-        return { children, "aria-label": tightTranslation(text)?.text ?? text };
-    } catch {
-        return { children: text };
-    }
+    const children = tightChildren(text, text, channel);
+    if (children === text || typeof text !== "string") return { children: text };
+    return { children, "aria-label": tightTranslation(text)?.text ?? text };
 }
 
 /**
@@ -4969,15 +6515,11 @@ function overflowProps(text: unknown, channel: unknown): Record<string, unknown>
  * channel translates messages. Then Discord's child stays until ✦ has the
  * text, and the translation takes its place ("✦ ...", the original in the
  * tooltip). It sits inside Discord's own element, so it keeps Discord's
- * styling and truncation.
+ * styling and truncation. Called only through a crash guard.
  */
 function tightChildren(original: unknown, text: unknown, channel: unknown): unknown {
-    try {
-        if (!isPaidSurfaceUser() || !channelTextAllowed(channel) || typeof text !== "string" || text.trim() === "") return original;
-        return <TightSwap key="subline-surface" original={original} text={text} />;
-    } catch {
-        return original;
-    }
+    if (!isPaidSurfaceUser() || !channelTextAllowed(channel) || typeof text !== "string" || text.trim() === "") return original;
+    return <TightSwap key="subline-surface" original={original} text={text} />;
 }
 
 /**
@@ -5032,7 +6574,9 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     if (!channelActive(channelId) || isLoadedInChannel(channelId, quoted.id)) return fallback;
     return <TightSwap original={original} text={markup.readable} tooltip={markup.readable} render={render} />;
 }
-const ReplyQuote = safe("reply quote", ReplyQuoteImpl, surfaceDebug);
+// Not safe(): that renders nothing on a throw. replyQuoteChildren's crash guard
+// puts it in a SurfaceBoundary, which renders Discord's own line instead.
+const ReplyQuote = ReplyQuoteImpl;
 
 /**
  * The quoted text with its code decoded in place ("decoded · HAPPY BIRTHDAY
@@ -5096,6 +6640,50 @@ function OnboardingLinesImpl({ prompt }: { prompt: unknown; }) {
 }
 const OnboardingLines = safe("onboarding lines", OnboardingLinesImpl, surfaceDebug);
 
+/* ------------------------------------------------- names and pronouns -- */
+
+/**
+ * A name, with its translation on hover (0.2.8): Discord's own child,
+ * untouched, unless this install has a plan with "Names and pronouns" on,
+ * the name is not the reader's own, and it holds a letter in a script the
+ * reader does not read (names.ts). Then the same child inside a hover
+ * (namesUi.tsx), which checks the script again on every render. A name the
+ * reader reads gets nothing at all, on any plan (owner rule 3, 2026-10-16).
+ * A name only in letters no reading language uses (runes, names.ts
+ * aiOnlyName) gets the hover only where ✦ can be asked: an AI plan.
+ * Discord's own child on any throw (the handler's crash guard). `userId` is
+ * read inside the guard: a record Discord is still building may throw on a
+ * property read.
+ */
+function nameHover(handler: HandlerId, original: unknown, name: unknown, userId: () => unknown): unknown {
+    if (original == null || !isNamesUser() || isCurrentUser(userId())) return original;
+    if (nameToTranslate(name, settings.store.targetLang) === null
+        && (aiOnlyName(name) === null || currentSurfaceService()?.canAskQuality() !== true)) return original;
+    return <SafeNameHover key="subline-name" handler={handler} original={original} name={name} />;
+}
+
+/**
+ * The texts of one profile card: its display name (or server nickname), the
+ * username when it is another name, and the pronouns. Never a server, channel
+ * or role name. Null when none of them is in a script the reader does not
+ * read: then nothing is appended and nothing is sent.
+ */
+function profileNameTexts(props: any) {
+    const target = settings.store.targetLang;
+    const names: unknown[] = [];
+    const shown = typeof props?.displayName === "string" ? props.displayName.trim().toLocaleLowerCase() : "";
+    for (const name of [props?.displayName, props?.user?.username]) {
+        // The username only when it is another name, not the same in lower case.
+        if (name !== props?.displayName && typeof name === "string" && name.trim().toLocaleLowerCase() === shown) continue;
+        if (nameToTranslate(name, target) !== null) names.push(name);
+        // Runes and the like: only where ✦ can be asked (namesUi.tsx ProfileNameLine).
+        else if (aiOnlyName(name) !== null && currentSurfaceService()?.canAskQuality() === true) names.push(name);
+    }
+    const pronouns = props?.pronouns;
+    if (names.length === 0 && pronounsToTranslate(pronouns, target) === null) return null;
+    return { names, pronouns };
+}
+
 /** The id of the right-click item. An identifier, never shown. */
 export const REPORT_MENU_ITEM_ID = "subline-report-translation";
 
@@ -5152,93 +6740,97 @@ export default definePlugin({
      * public web bundle, and each replacement fails on its own.
      */
     patches: SURFACE_PATCHES.map(({ find, replacement }) => ({ find, replacement })),
-
-    // Every method below is called from a patch inside Discord's own code.
-    // For anyone who is not a paid install each returns exactly what Discord
-    // would have had there: null where the patch appends a child, and the
-    // original child where it wraps one.
+    // Every method below is called from a patch inside Discord's own code,
+    // and every one is crash-guarded (surfaces/guard.tsx): on any throw, and
+    // when the owner's off switch names its feature, it returns exactly what
+    // Discord had there (null where the patch appends a child, the original
+    // child where it wraps one), and every element it returns sits in a
+    // boundary that renders Discord's original if it throws while rendering.
+    // For anyone who is not a paid install each returns Discord's value too.
     // Every profile bio (the About Me section, the full profile, the DM side
     // profile, the minimal popout): Discord's own bio renderer element,
     // translated IN PLACE with a toggle at its end. Discord's element
     // unchanged for anyone not paid, for an empty bio, for the reader's own
     // bio, or on any throw.
-    bioInPlace: (original: unknown, userBio: unknown, userId?: unknown) => {
-        try {
-            if (!isPaidSurfaceUser() || original == null || typeof userBio !== "string" || userBio.trim() === "") return original;
-            const uid = userId ?? (original as any)?.props?.userId;
-            if (isCurrentUser(uid)) return original;
-            return <BioInPlace element={original} bio={userBio} userId={uid} />;
-        } catch {
-            return original;
-        }
-    },
+    bioInPlace: guard("bioInPlace", "first", () => "bio", (original: unknown, userBio: unknown, userId?: unknown) => {
+        if (!isPaidSurfaceUser() || original == null || typeof userBio !== "string" || userBio.trim() === "") return original;
+        const uid = userId ?? (original as any)?.props?.userId;
+        if (isCurrentUser(uid)) return original;
+        return <BioInPlace element={original} bio={userBio} userId={uid} />;
+    }),
     // Props for Discord's OverflowTooltip around a stage topic or a thread
     // title: exactly { children } as Discord had it for anyone not paid.
     // Paid: the in-place translation, and an aria-label that is always a
     // real string (the translation once known, else the original), since
     // the tooltip derives its label from string children only.
-    stageTopicProps: (topic: unknown, channel: unknown) => overflowProps(topic, channel),
-    threadTitleProps: (title: unknown, thread: unknown) => overflowProps(title, thread),
-    forumTitleChildren: (original: unknown, channel: any) => tightChildren(original, channel?.name, channel),
+    stageTopicProps: guard("stageTopicProps", "props", () => "stage-topic", (topic: unknown, channel: unknown) => overflowProps(topic, channel)),
+    threadTitleProps: guard("threadTitleProps", "props", () => "thread-title", (title: unknown, thread: unknown) => overflowProps(title, thread)),
+    forumTitleChildren: guard("forumTitleChildren", "first", () => "forum-title",
+        (original: unknown, channel: any) => tightChildren(original, channel?.name, channel)),
     // A tag pill knows its tag, not its channel: it follows the rule of the
     // channel being viewed (the forum, or a post in it).
-    forumTagChildren: (name: unknown) =>
-        tightChildren(name, name, ChannelStore.getChannel(SelectedChannelStore.getChannelId() ?? "")),
+    forumTagChildren: guard("forumTagChildren", "first", () => "forum-tag", (name: unknown) =>
+        tightChildren(name, name, ChannelStore.getChannel(SelectedChannelStore.getChannelId() ?? ""))),
     // Member list and DM list: the custom status text (user-level, allowed
     // wherever it is shown).
-    statusTextChildren: (original: unknown, text: unknown) => {
-        try {
-            if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return original;
-            if (decodeMessage(text) !== null) {
-                const lead = typeof original === "string" ? /^\s*/.exec(original)![0] : "";
-                return <>{lead}<DecodedStatus key="subline-surface" text={text} /></>;
-            }
-            return <TightSwap key="subline-surface" original={original} text={text} />;
-        } catch {
-            return original;
+    statusTextChildren: guard("statusTextChildren", "first", () => "status-list", (original: unknown, text: unknown) => {
+        if (!isPaidSurfaceUser() || typeof text !== "string" || text.trim() === "") return original;
+        if (decodeMessage(text) !== null) {
+            const lead = typeof original === "string" ? /^\s*/.exec(original)![0] : "";
+            return <>{lead}<DecodedStatus key="subline-surface" text={text} /></>;
         }
-    },
-    onboardingHeading: (heading: unknown, prompt: unknown) => {
-        try {
-            if (!isPaidSurfaceUser()) return heading;
-            return [heading, <OnboardingLines key="subline-surface" prompt={prompt} />];
-        } catch {
-            return heading;
-        }
-    },
+        return <TightSwap key="subline-surface" original={original} text={text} />;
+    }),
+    onboardingHeading: guard("onboardingHeading", "first", () => "onboarding", (heading: unknown, prompt: unknown) => {
+        if (!isPaidSurfaceUser()) return heading;
+        return [heading, <OnboardingLines key="subline-surface" prompt={prompt} />];
+    }),
     // The profile custom status: the translation IN PLACE of the status text
     // inside Discord's bubble, with a toggle at its end (see the patch). The
     // status string itself for anyone not paid, for the reader's own status
     // (which includes the live preview while they type one), or on a throw.
-    statusBubbleText: (text: unknown, props: any) => {
-        try {
-            if (!isPaidSurfaceUser() || props?.sublineSelf === true || typeof text !== "string" || text.trim() === "") return text;
-            // A status in a code: decoded here, then translated if foreign.
-            if (decodeMessage(text) !== null) return <DecodedStatus text={text} />;
-            return <StatusBubbleText text={text} userId={props?.sublineUser} />;
-        } catch {
-            return text;
-        }
-    },
+    statusBubbleText: guard("statusBubbleText", "first", () => "status-profile", (text: unknown, props: any) => {
+        if (!isPaidSurfaceUser() || props?.sublineSelf === true || typeof text !== "string" || text.trim() === "") return text;
+        // A status in a code: decoded here, then translated if foreign.
+        if (decodeMessage(text) !== null) return <DecodedStatus text={text} />;
+        return <StatusBubbleText text={text} userId={props?.sublineUser} />;
+    }),
     // Called inside the bubble's render, as an input to its measuring effect.
-    useSurfaceVersion,
+    useSurfaceVersion: guardHook("useSurfaceVersion", "status-profile", useSurfaceVersion),
     // The reply bar's quoted line. Nothing for a blocked, ignored or
     // suspended author: Discord's own line, and nothing is sent.
-    replyQuoteChildren: (original: unknown, props: any) => {
-        try {
-            if (original == null) return original;
-            if (props?.isReplyAuthorBlocked === true || props?.isReplyAuthorIgnored === true) return original;
-            if (isHiddenSuspended(props?.referencedMessage?.message)) return original;
-            // Nothing paid for: Discord's own value, untouched. With the
-            // surfaces setting off, only a decoded code (local, free).
-            if (!activated()) return original;
-            if (!isPaidSurfaceUser() && decodeMessage(props?.referencedMessage?.message?.content) === null) return original;
-            return <ReplyQuote original={original} referenced={props?.referencedMessage} />;
-        } catch {
-            return original;
-        }
-    },
-    wrapParser,
+    replyQuoteChildren: guard("replyQuoteChildren", "first", () => "reply-quote", (original: unknown, props: any) => {
+        if (original == null) return original;
+        if (props?.isReplyAuthorBlocked === true || props?.isReplyAuthorIgnored === true) return original;
+        if (isHiddenSuspended(props?.referencedMessage?.message)) return original;
+        // Nothing paid for: Discord's own value, untouched. With the
+        // surfaces setting off, only a decoded code (local, free).
+        if (!activated()) return original;
+        if (!isPaidSurfaceUser() && decodeMessage(props?.referencedMessage?.message?.content) === null) return original;
+        return <ReplyQuote original={original} referenced={props?.referencedMessage} />;
+    }),
+    wrapParser: guard("wrapParser", args => args[1], () => null, wrapParser),
+    // NAMES AND PRONOUNS (0.2.8). One patch per place (see surfaces/patches.ts);
+    // each method returns Discord's own value exactly for anyone without a
+    // plan, with "Names and pronouns" off, for the reader's own name, for a
+    // name in the reader's script without an AI plan, and on any throw.
+    // The message author's name, and the replied-to author's in a reply
+    // preview (the same component): props are Discord's username props.
+    messageAuthorName: guard("messageAuthorName", "first", () => "name-message", (original: unknown, name: unknown, props: any) =>
+        nameHover("messageAuthorName", original, name, () => props?.message?.author?.id ?? props?.userOverride?.id)),
+    // A user mention in a message ("@name"): the user's own name is the text.
+    mentionName: guard("mentionName", "first", () => "name-mention", (original: unknown, name: unknown, user: any) =>
+        nameHover("mentionName", original, name, () => user?.id)),
+    // The profile card (popout, full profile, DM side profile): a small grey
+    // line under the name and the pronouns. Null (nothing appended) for
+    // anyone without a plan, with the setting off, for the reader's own
+    // profile, when there is nothing to show, or on any throw.
+    profileNameLine: guard("profileNameLine", "null", () => "name-profile", (props: any) => {
+        if (!isNamesUser() || isCurrentUser(props?.user?.id)) return null;
+        const texts = profileNameTexts(props);
+        if (texts === null) return null;
+        return <SafeProfileNameLine key="subline-names" handler="profileNameLine" texts={texts} />;
+    }),
 
     // Declarative — unlike the force-quality popover above, this is the ONLY
     // chat-bar button this plugin registers, so it needs no second, manual
@@ -5261,7 +6853,8 @@ export default definePlugin({
                 label: on ? "Disable auto-translate here" : "Enable auto-translate here",
                 // P2: off is the same globe, dimmed and grey. The fog emoji used
                 // before rendered on Windows as a struck-through ≈.
-                icon: () => <span style={on ? CHANNEL_ICON_ON : CHANNEL_ICON_OFF} data-subline-channel-icon={on ? "on" : "off"}>🌐</span>,
+                // Redrawn when the lists change, also from another computer (channelSync.ts).
+                icon: () => <ChannelGlobe channelId={message.channel_id} />,
                 message,
                 channel,
                 onClick: async () => {
@@ -5280,13 +6873,15 @@ export default definePlugin({
                         // exists to infer, and it is the one place where
                         // spending the budget was directly requested.
                         if (nowOn) catchUp(message.channel_id, { becomingFocused: true });
+                        // Shared with the account's other computers (linked only), 2 s after the last click.
+                        channelChangedHere();
                     } catch {
                         // toggleChannel rethrows on persistence failure (memory
                         // already rolled back by then) -- surface it instead of
                         // leaving an unhandled rejection. catchUp() is inside
                         // this try too, so a throw there can't escape unhandled
                         // either.
-                        showToast(CHANNEL_TOGGLE_FAILED, "failure");
+                        toast(CHANNEL_TOGGLE_FAILED, "failure");
                     }
                 }
             };
@@ -5298,8 +6893,9 @@ export default definePlugin({
         // a press during the awaits below can never overwrite it (previewSession).
         previewLedgerLoaded = false;
         previewLedgerReady = loadPreviewLedger(previews).finally(() => { previewLedgerLoaded = true; });
+        try { (globalThis as any)[BROWSER_LINK_SWITCH] = useBrowserLinkForTest; } catch { /* the test switch only */ }
         // Every Activate / Add AI link opens the right panel while the plugin runs.
-        registerUpgradeOpener(openUpgradeForLevel, openCodeEntryPanel);
+        registerUpgradeOpener(openUpgradeForLevel, openCodeEntryOrLink, linkFromSettings, { move: startMove, canMove: canMovePlan, finish: finishMoveFromSettings, canFinish: canFinishMove });
         unsubscribePanels?.();
         unsubscribePanels = subscribeEntitlement(closePanelsForLevel);
         // The installer's install id (settings.json) wins over the plugin's own.
@@ -5307,6 +6903,31 @@ export default definePlugin({
             read: () => settings.store.installId,
             write: id => { settings.store.installId = id; }
         });
+        // Which account a confirmed link bound that id to, kept beside it (account.ts BindingSetting).
+        connectBindingSetting({
+            read: () => settings.store.installBinding,
+            write: (binding: Binding) => { settings.store.installBinding = binding; },
+            readPending: () => settings.store.installPendingBind,
+            writePending: (pending: PendingBind | null) => { settings.store.installPendingBind = pending ?? ""; }
+        });
+        // A crash in one of the linking windows closes it (linkPanels.tsx); here it is logged and recorded.
+        setPanelCrashHandler((error, componentStack) => {
+            logger.error(`A Subline window crashed and was closed: ${error instanceof Error ? error.message : String(error)}${componentStack}`, error);
+            recordError("link-crash");
+        });
+        // Install ids are per Discord account from here on: nothing asks the
+        // relay until the signed-in account is known (account.ts). Subscribed
+        // first, so a connection during the reads below is never missed.
+        requireAccount(true);
+        // Subline's settings follow the Discord account (prefs.ts): bound
+        // before any account is entered, so its copy is written into them.
+        bindPrefStore({
+            read: key => settings.store[key],
+            write: (key, value) => { (settings.store as Record<PrefKey, PrefValue>)[key] = value; },
+            defaultOf: key => settings.def[key].default
+        });
+        onPrefChangedHere(prefChangedHere);
+        FluxDispatcher.subscribe("CONNECTION_OPEN", onConnectionOpen);
         normaliseTargetLangSetting();
         normaliseEngineSetting();
         activeTargetLang = settings.store.targetLang;
@@ -5344,7 +6965,7 @@ export default definePlugin({
         // an absent or unreadable manifest simply never prompts.
         updateWatch = createUpdateWatch({
             runningBuildId: BUILD_ID,
-            readStagedBuildId: () => Native.readStagedBuildId(),
+            readStagedBuildId: () => transport.readStagedBuildId(),
             onUpdateStaged: () => showNotice(
                 "Subline updated in the background. Restart Discord to load the new version.",
                 "Restart Discord",
@@ -5360,7 +6981,7 @@ export default definePlugin({
         // minute after start (never in Discord's busy first seconds).
         const askForUpdate = () => {
             try {
-                void Promise.resolve(Native.askHelperForUpdate?.(BUILD_ID, PLUGIN_VERSION)).then(result => {
+                void transport.askHelperForUpdate(BUILD_ID, PLUGIN_VERSION).then(result => {
                     if (result === "kick") logger.info("a newer Subline build is out; asked the background helper to install it now");
                 }).catch(() => { });
             } catch {
@@ -5370,16 +6991,23 @@ export default definePlugin({
         updateAskStart = setTimeout(askForUpdate, ASK_FOR_UPDATE_FIRST_MS);
         updateAskTimer = setInterval(askForUpdate, ASK_FOR_UPDATE_EVERY_MS);
 
+        // In a browser: the store updated the add-on under this open tab, which
+        // can no longer reach it. Say so once, with a Reload button, instead
+        // of translating nothing in silence.
+        unsubscribeAddonGone?.();
+        unsubscribeAddonGone = onWebAddonGone(() => showNotice(ADDON_RELOAD_COPY.notice, ADDON_RELOAD_COPY.button, () => location.reload()));
+
         // Did Subline's patches apply in this Discord? Nothing runs now: the
         // check waits for messages (or ten minutes), then reports at most once
         // per Discord build per day, and only when something failed.
         startPatchHealth();
+        startGuardHealth();
         // The installed APP may be older than this mod needs (the feed updates
         // only the mod): say so once per mod version (appNotice.ts). Never
         // awaited and never blocks translation.
         void checkAppNotice({
             modVersion: PLUGIN_VERSION,
-            readSignals: () => Native.readAppSignals(),
+            readSignals: () => transport.readAppSignals(),
             storage: { get: key => DataStore.get(key), set: (key, value) => DataStore.set(key, value) },
             show: showAppNotice,
             log: (event, detail) => logger.info(event, detail)
@@ -5393,23 +7021,27 @@ export default definePlugin({
         // once the relay has answered, or failed to.
         // Whose answer is stored matters: a code cleared since, or a new
         // install id after Subline was removed and installed again, makes the
-        // stored answer about someone else (entitlement.ts holder).
-        setCurrentHolder(holderFor(savedCode(), await installIdOnce()));
-        await loadEntitlement();
-        void refreshEntitlement();
+        // stored answer about someone else (entitlement.ts holder). And it is
+        // the signed-in Discord account's: enterAccount reads that account's
+        // answer and asks the relay. Discord may not know the user yet at
+        // this point; then CONNECTION_OPEN does it, and until then nothing is
+        // owned.
+        const signedIn = signedInUserId();
+        if (signedIn !== null) await followAccount(signedIn);
         startEntitlementClock();
 
         // The weekly note's running count. Awaited, like the channel lists
-        // below, so the first translation of the session is counted into the
+        // (enterAccount), so the first translation of the session is counted into the
         // week it belongs to.
         await loadWeeklyStats();
-        // The client's own count of today's five (a second guard; taste.ts).
-        await loadLocalTasteCount();
         // The previews already shown: their ✦ lines, and never a second charge.
         await previewLedgerReady;
         showWeeklyNoteIfDue();
 
-        await loadEnabledChannels();
+        // The 🌐 lists are the signed-in account's (channels.ts): loaded by
+        // enterAccount, awaited above through followAccount. Until an account is
+        // known, nothing is on.
+
         // AWAITED, unlike the translation cache below: this decides whether the
         // very first batch of the session is even allowed to touch the LLM
         // engine. Reading it late would let that batch go out against a quota
@@ -5433,8 +7065,11 @@ export default definePlugin({
         const cacheReady = loadPersistedTranslations();
 
         rebuildBatcher();
-        let lastCode = savedCode();
+        lastSeenCode = savedCode();
         onSettingsChanged(() => {
+            // An account switch swapping in the next account's code: not a
+            // change made here (enterAccount rebuilds and asks the relay).
+            if (swappingCodeFields) return;
             // Order matters: lift a stale pin BEFORE rebuilding, so the new
             // batcher is built for the engine the user now has credentials for.
             releaseFallbackIfCredentialChanged();
@@ -5444,11 +7079,11 @@ export default definePlugin({
             // cleared by hand is remembered, so a purchase the relay still
             // links to this install does not bring it straight back.
             const code = savedCode();
-            const changed = code !== lastCode;
-            const dropped = lastCode !== "" && lastCode === autoDroppedCode;
-            if (changed && code === "" && lastCode !== "" && !dropped) settings.store.clearedPurchaseCode = lastCode;
+            const changed = code !== lastSeenCode;
+            const dropped = lastSeenCode !== "" && lastSeenCode === autoDroppedCode;
+            if (changed && code === "" && lastSeenCode !== "" && !dropped) settings.store.clearedPurchaseCode = lastSeenCode;
             if (dropped) autoDroppedCode = "";
-            lastCode = code;
+            lastSeenCode = code;
             // What the relay said about the old code is not about the new one:
             // until it answers again, the stored answer counts for nothing.
             if (changed) currentHolderNow();
@@ -5497,6 +7132,7 @@ export default definePlugin({
     stop() {
         removeMessageAccessory(SURFACE_ACCESSORY_ID);
         resetInPlaceFlips();
+        resetNameTips();
         // Nothing queued is sent after this, and the cache is saved as it is.
         surfaceService?.stop();
         void surfaceCache?.persistNow();
@@ -5517,9 +7153,17 @@ export default definePlugin({
         updateAskTimer = null;
         patchHealthWatch?.stop();
         patchHealthWatch = null;
+        setGuardCatchSink(null);
+        guardHealth?.stop();
+        guardHealth = null;
+        unsubscribeAddonGone?.();
+        unsubscribeAddonGone = null;
         onSettingsChanged(null);
         registerUpgradeOpener(null);
         connectInstallIdSetting(null);
+        connectBindingSetting(null);
+        forgetSessionBinding();
+        setPanelCrashHandler(null);
         checkoutFlow?.stop();
         checkoutFlow = null;
         setPaymentPending(false);
@@ -5547,6 +7191,32 @@ export default definePlugin({
         announcedPurchase = "";
         checkoutTarget = "automatic";
         activeTargetLang = null;
+        FluxDispatcher.unsubscribe("CONNECTION_OPEN", onConnectionOpen);
+        // The next start() resolves the signed-in account again.
+        endChannelSync();
+        forgetChannelAccount();
+        endPrefSync();
+        forgetPrefAccount();
+        onPrefChangedHere(null);
+        bindPrefStore(null);
+        accountEpoch++;
+        currentAccount = null;
+        currentLegacy = false;
+        legacyOwned = false;
+        localAccounts = {};
+        linkBusy = false;
+        fallbackRunning = false;
+        authorizeWindowBroken = false;
+        try { if ((globalThis as any)[BROWSER_LINK_SWITCH] === useBrowserLinkForTest) delete (globalThis as any)[BROWSER_LINK_SWITCH]; } catch { /* the test switch only */ }
+        afterLink = null;
+        confirmedFor = null;
+        askingBeforeSale = false;
+        moveTicket = null;
+        moveOfferedTo = null;
+        silentTried.clear();
+        silentRunningFor = null;
+        swappingCodeFields = false;
+        lastSeenCode = "";
         FluxDispatcher.unsubscribe("MESSAGE_CREATE", onMessageCreate);
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);
@@ -5601,6 +7271,9 @@ export default definePlugin({
         // model or target language, and answers from the old one should not
         // silently survive into it.
         qualityPhrases.clear();
+        // The mention case's per-message words: worked out for this session's
+        // readable texts; the next session works them out again.
+        edgeMentions.clear();
         // THE TWO CALLBACK LISTS. Both hold functions belonging to subtitle
         // components from the session being torn down. Nothing removed them:
         // stop() unsubscribed Flux and disposed the batchers, then left these

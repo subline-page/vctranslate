@@ -131,3 +131,56 @@ export function readAppSignalsSync(options: AppSignalsOptions = {}): AppSignals 
         return NO_SIGNALS;
     }
 }
+
+/**
+ * Only the app version, for the relay's `x-subline-app` header (0.2.8,
+ * engines/relay.ts). One small file; null when absent or unreadable, so an
+ * app older than app-version.json sends no header. Never throws.
+ */
+export function readAppVersionSync(options: AppSignalsOptions = {}): string | null {
+    try {
+        const dir = options.dir ?? statusDirFor(
+            options.platform ?? process.platform,
+            options.env,
+            options.home ?? homedir()
+        );
+        if (dir === null) return null;
+        const text = readText(join(dir, APP_VERSION_FILENAME));
+        return text === null ? null : parseAppVersion(text);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * How long a read app version is reused. The header rides on every relay
+ * request, so the file is read at most once in this window. The app writes
+ * the file on every run, and an app update while Discord stays open shows
+ * up within it.
+ */
+export const APP_VERSION_TTL_MS = 10 * 60_000;
+
+/**
+ * The header's source on the desktop: `read` once per APP_VERSION_TTL_MS,
+ * the last answer in between. A read that throws counts as null for that
+ * window. A clock that went backwards reads again.
+ */
+export function cachedAppVersionReader(
+    read: () => string | null = () => readAppVersionSync(),
+    now: () => number = Date.now
+): () => string | null {
+    let value: string | null = null;
+    let readAt: number | null = null;
+    return () => {
+        const t = now();
+        if (readAt === null || t - readAt >= APP_VERSION_TTL_MS || t < readAt) {
+            readAt = t;
+            try {
+                value = read();
+            } catch {
+                value = null;
+            }
+        }
+        return value;
+    };
+}

@@ -1,6 +1,8 @@
 import { PLUGIN_VERSION } from "../buildStamp";
 import { HttpError } from "../httpError";
 import type { BatchRequest, Result } from "../types";
+import { offListFrom } from "../surfaces/features";
+import { cleanPrefEntries, type PrefEntry, type PrefKey } from "../prefShape";
 
 /**
  * Sent on every relay request so the relay can tell a client that knows about
@@ -13,14 +15,18 @@ export const CLIENT_HEADER = "x-subline-client";
 export const CLIENT_ID = `vcTranslate/${PLUGIN_VERSION}`;
 
 /**
- * The paid-only model (v2). Every request says so with `x-subline-api: 2`, and
- * names the install it comes from with `x-subline-install: free_<hex>`, so the
- * relay can apply the 3-computer limit and join the install to its account.
- * Without the api header the relay answers exactly as it did for v0.1.9 and
- * earlier, which is what keeps older installs working until they update.
+ * The paid-only model, with account linking (0.2.8). Every request says so
+ * with `x-subline-api: 3`, and names the install it comes from with
+ * `x-subline-install: free_<hex>`, so the relay can join the install to its
+ * account. API 3 means "this client can link a Discord account": the relay
+ * then entitles nothing until the install is linked (`linked: false` on
+ * status, 402/403 `not_linked` elsewhere). API 2 (0.2.7 and older) keeps
+ * today's rules, and without the api header the relay answers exactly as it
+ * did for v0.1.9 and earlier, which is what keeps older installs working until
+ * they update.
  */
 export const API_HEADER = "x-subline-api";
-export const API_VERSION = "2";
+export const API_VERSION = "3";
 export const INSTALL_HEADER = "x-subline-install";
 /**
  * "This install was used before 0.2.0" (a local trial start, or an install id
@@ -36,6 +42,37 @@ export const PRIOR_HEADER = "x-subline-prior";
  */
 export const CHECK_HEADER = "x-subline-check";
 
+/**
+ * The app this plugin runs in (0.2.8): the desktop app's version from
+ * app-version.json (`0.2.8`), or the browser add-on's (`addon/0.2.8`). The
+ * owner page shows it beside the Subline version and counts add-on computers
+ * (relay/src/versions.ts appVersionOf). It names the app, never the user.
+ *
+ * WHO SETS IT. Whatever process runs these requests: native.ts in Discord's
+ * main process (desktop), the add-on's background.ts in the browser. Nothing
+ * else does, so tests and any other process send no header, as before.
+ */
+export const APP_HEADER = "x-subline-app";
+/** The relay's own check (relay/src/versions.ts APP_VERSION_RE): anything else is left out, never sent. */
+const APP_HEADER_SHAPE = /^(?:addon\/)?\d{1,4}(?:\.\d{1,4}){1,3}$/;
+
+let appSource: () => unknown = () => null;
+
+/** Name the app for every relay request from now on. Asked on each request; it must be cheap. */
+export function setRelayAppSource(source: () => string | null): void {
+    appSource = source;
+}
+
+/** The header's value, or null to leave it out. Never throws: a request never fails over this. */
+export function relayAppHeaderValue(): string | null {
+    try {
+        const v = appSource();
+        return typeof v === "string" && APP_HEADER_SHAPE.test(v) ? v : null;
+    } catch {
+        return null;
+    }
+}
+
 /** Optional extras on a v2 status request. */
 export interface StatusOptions {
     prior?: boolean;
@@ -50,6 +87,8 @@ export function relayHeaders(credential: string, install?: string, json = false,
         [API_HEADER]: API_VERSION
     };
     if (install) h[INSTALL_HEADER] = install;
+    const app = relayAppHeaderValue();
+    if (app !== null) h[APP_HEADER] = app;
     if (options.prior) h[PRIOR_HEADER] = "1";
     if (options.check) h[CHECK_HEADER] = "1";
     if (json) h["content-type"] = "application/json";
@@ -64,6 +103,12 @@ export function relayHeaders(credential: string, install?: string, json = false,
  */
 function withErrorCode<E extends Error>(err: E, body: any): E {
     if (!body || typeof body.error !== "string") return err;
+    // 0.2.8 details some refusals carry, each checked before it rides along:
+    // the date a plan may move again, the pairing tries left, and "this
+    // account moved that key away itself".
+    if (typeof body.until === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.until)) (err as any).until = body.until;
+    if (Number.isInteger(body.triesLeft) && body.triesLeft >= 0 && body.triesLeft <= 100) (err as any).triesLeft = body.triesLeft;
+    if (body.moved === true) (err as any).moved = true;
     // A promo claimed too often from one network: the relay keeps the older
     // word ("rate_limited") and says why in `reason`.
     if (body.error === "rate_limited" && body.reason === "net_limited") (err as any).errorCode = "net_limited";
@@ -167,6 +212,41 @@ export interface RelayStatus {
     grant?: "early";
     /** The answer to a check-only request (x-subline-check): nothing was linked. */
     check?: { valid: boolean; automatic: boolean; ai: boolean };
+    /**
+     * API 3: whether this install's account is linked to a Discord account.
+     * False means nothing is entitled until it is. Absent from an older relay,
+     * which is "not stated", never "not linked".
+     */
+    linked?: boolean;
+    /**
+     * A link answer only: the saved code was left out of the link, and why
+     * (another Discord account's, or held by another computer). The app
+     * drops it, as it would on a status 409.
+     */
+    codeRefused?: "code_on_other_account" | "code_in_use";
+    /** A link answer only: the left-out code is one this account moved away itself (Move my plan), not a stranger's. */
+    codeMoved?: boolean;
+    /**
+     * API 3, not linked: this computer had the plan before 0.2.8 (a prior
+     * payer). The plan is answered as usual and keeps working; the app shows
+     * the Link bar until it links. Never a block.
+     */
+    mustLink?: boolean;
+    /**
+     * API 3, not linked, nothing owned: a purchase was started from this
+     * install (a 0.2.7 checkout whose webhooks have not landed). It will
+     * reach whichever account links this install, so the Link asks the
+     * account confirm first and is never made silently.
+     */
+    pendingPurchase?: boolean;
+    /** A Move my plan answer: the plan moved into this account. */
+    moved?: boolean;
+    /**
+     * The owner's off switch: the features switched off for everyone. Absent
+     * when the relay left it out (its read failed) or sent it malformed; the
+     * plugin then keeps the last list it had.
+     */
+    off?: string[];
 }
 
 /** POST /v1/redeem: a promo code for this install. A compiled constant, like RELAY_URL. */
@@ -385,7 +465,8 @@ export async function fetchRelayStatus(
 
     // A v2 answer (the paid-only model): the entitlement, and no daily count
     // unless the install is an Automatic owner with previews.
-    if (typeof body.automatic === "boolean") return v2StatusFrom(body);
+    // (An API 3 "not linked" answer counts too, even without `automatic`.)
+    if (typeof body.automatic === "boolean" || typeof body.linked === "boolean") return v2StatusFrom(body);
 
     // Validated rather than blind-cast, on the same principle as the results
     // array below: a malformed count reaching the renderer would be shown to
@@ -432,8 +513,182 @@ function v2StatusFrom(body: any): RelayStatus {
         grant: body.grant === "early" ? "early" : undefined,
         check: body.check && typeof body.check === "object" && typeof body.check.valid === "boolean"
             ? { valid: body.check.valid, automatic: body.check.automatic === true, ai: body.check.ai === true }
-            : undefined
+            : undefined,
+        linked: typeof body.linked === "boolean" ? body.linked : undefined,
+        codeRefused: body.codeRefused === "code_on_other_account" || body.codeRefused === "code_in_use" ? body.codeRefused : undefined,
+        codeMoved: body.codeMoved === true ? true : undefined,
+        mustLink: body.mustLink === true ? true : undefined,
+        pendingPurchase: body.pendingPurchase === true ? true : undefined,
+        moved: body.moved === true ? true : undefined,
+        off: offListFrom(body.off)
     };
+}
+
+/**
+ * POST /v1/link: the code Discord's Authorize window handed back (link.ts),
+ * for the relay to exchange with Discord and link this install's account to
+ * that Discord account. A compiled constant, like RELAY_URL.
+ */
+export const RELAY_LINK_URL = "https://relay.subline.page/v1/link";
+
+/** A link waits on the relay AND on Discord behind it, while a person watches. */
+export const LINK_TIMEOUT_MS = 20_000;
+
+/**
+ * Link this install's account to the Discord account that authorized `code`.
+ * The usual headers (the saved code or the install bearer as the credential,
+ * the install bearer as x-subline-install) and `{ code, expect }`: `expect`
+ * is the signed-in Discord account's id (0.2.8, EVERY BIND NAMES THE
+ * ACCOUNT). The relay compares it with the account Discord authorized before
+ * it binds anything, and never stores it. The answer is a status answer (plus
+ * `linked: true`), read exactly as fetchRelayStatus reads one. Throws an
+ * HttpError carrying the relay's word on a refusal ("bad_code",
+ * "discord_refused", "discord_unreachable", "unavailable", "rate_limited",
+ * "wrong_account", "plan_held").
+ */
+export async function fetchRelayLink(
+    credential: string,
+    install: string,
+    code: string,
+    expect: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = LINK_TIMEOUT_MS
+): Promise<RelayStatus> {
+    return postForStatus(RELAY_LINK_URL, "relay link", credential, install, { code, expect }, fetchImpl, timeoutMs);
+}
+
+/** POST `payload` with the usual headers: a status-shaped answer, or an HttpError with the relay's word. */
+async function postForStatus(
+    url: string, what: string, credential: string, install: string, payload: unknown, fetchImpl: typeof fetch, timeoutMs: number
+): Promise<RelayStatus> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(url, {
+            method: "POST",
+            headers: relayHeaders(credential, install, true),
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (!res.ok || !body || body.ok !== true || (typeof body.automatic !== "boolean" && typeof body.linked !== "boolean")) {
+            const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
+            throw withErrorCode(new HttpError(`${what}: HTTP ${res.status}${detail}`, res.status), body);
+        }
+        return v2StatusFrom(body);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * POST /v1/link/poll: the browser fallback (linkFallback.ts). When Discord's
+ * Authorize window cannot open inside Discord, the app opens Discord's
+ * authorize page in the browser with a random `state`, and asks here every 2
+ * seconds whether Discord's redirect has reached the relay. A compiled
+ * constant, like RELAY_URL.
+ */
+export const RELAY_LINK_POLL_URL = "https://relay.subline.page/v1/link/poll";
+
+/** What one poll said: still waiting, the pairing code is needed, or linked. */
+export type LinkPollOutcome =
+    | { kind: "pending"; }
+    | { kind: "pair_needed"; }
+    | { kind: "linked"; status: RelayStatus; };
+
+/**
+ * One poll: `{ state, expect }`, plus the pairing code the browser showed
+ * (`pair`) and a move ticket (`ticket`, Move my plan) when given. 202
+ * `pending` and 202 `pair_needed` are waits; 200 is the link answer, read
+ * like a status. Anything else throws an HttpError with the relay's word
+ * ("pair_wrong" with triesLeft, "state_expired", "state_taken",
+ * "wrong_account", and the link and move refusals).
+ */
+export async function fetchRelayLinkPoll(
+    credential: string,
+    install: string,
+    request: { state: string; expect: string; pair?: string; ticket?: string; },
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = LINK_TIMEOUT_MS
+): Promise<LinkPollOutcome> {
+    const payload: Record<string, string> = { state: request.state, expect: request.expect };
+    if (request.pair !== undefined) payload.pair = request.pair;
+    if (request.ticket !== undefined) payload.ticket = request.ticket;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_LINK_POLL_URL, {
+            method: "POST",
+            headers: relayHeaders(credential, install, true),
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (res.status === 202 && body && body.ok === false && (body.error === "pending" || body.error === "pair_needed")) {
+            return { kind: body.error };
+        }
+        if (res.status !== 200 || !body || body.ok !== true || (typeof body.automatic !== "boolean" && typeof body.linked !== "boolean")) {
+            const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
+            throw withErrorCode(new HttpError(`relay link poll: HTTP ${res.status}${detail}`, res.status), body);
+        }
+        return { kind: "linked", status: v2StatusFrom(body) };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * MOVE MY PLAN (0.2.8): POST /v1/move/start from a linked computer of the
+ * account that holds the plan answers a one-time ticket (10 minutes); POST
+ * /v1/move/finish `{ ticket, code, expect }` from the new account, after its
+ * Authorize, moves the plan. Compiled constants, like RELAY_URL.
+ */
+export const RELAY_MOVE_START_URL = "https://relay.subline.page/v1/move/start";
+export const RELAY_MOVE_FINISH_URL = "https://relay.subline.page/v1/move/finish";
+/** A move ticket as the relay makes them: 32 random bytes, base64url. */
+export const MOVE_TICKET_RE = /^[A-Za-z0-9_-]{43}$/;
+
+/** The ticket, or an HttpError with the relay's word ("move_too_soon" with `until`, "no_plan", "not_linked"). */
+export async function fetchRelayMoveStart(
+    credential: string,
+    install: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = CHECKOUT_TIMEOUT_MS
+): Promise<{ ticket: string; expiresAt: number; }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_MOVE_START_URL, {
+            method: "POST",
+            headers: relayHeaders(credential, install, true),
+            body: "{}",
+            signal: controller.signal
+        });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (!res.ok || !body || body.ok !== true || typeof body.ticket !== "string" || !MOVE_TICKET_RE.test(body.ticket)) {
+            const detail = body && typeof body.error === "string" ? ` ${body.error}` : "";
+            throw withErrorCode(new HttpError(`relay move start: HTTP ${res.status}${detail}`, res.status), body);
+        }
+        return { ticket: body.ticket, expiresAt: positive(body.expiresAt) ? body.expiresAt : 0 };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/** The new account's status answer (plus `moved: true`), or an HttpError with the relay's word. */
+export async function fetchRelayMoveFinish(
+    credential: string,
+    install: string,
+    ticket: string,
+    code: string,
+    expect: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = LINK_TIMEOUT_MS
+): Promise<RelayStatus> {
+    return postForStatus(RELAY_MOVE_FINISH_URL, "relay move finish", credential, install, { ticket, code, expect }, fetchImpl, timeoutMs);
 }
 
 /** How long one ✦ batch may take. An LLM answer can take seconds; a stall is not that. */
@@ -524,4 +779,141 @@ export async function translateWithRelayDetailed(
         cap: cap === 0 ? undefined : cap,
         serverNow: typeof body.now === "number" && Number.isFinite(body.now) && body.now > 0 ? body.now : undefined
     };
+}
+
+/**
+ * THE 🌐 CHOICES OF A LINKED ACCOUNT (relay/src/channels.ts). GET answers the
+ * account's salt and its entries (hash -> { s, at }); POST `{ salt, changes }`
+ * merges changes in (last write wins). A compiled constant, like RELAY_URL.
+ */
+export const RELAY_CHANNELS_URL = "https://relay.subline.page/v1/channels";
+/** Sync is background work: a stalled call gives way, and the next sync tries again. */
+export const CHANNELS_TIMEOUT_MS = 10_000;
+
+export type ChannelSyncState = "on" | "off" | "default";
+export interface ChannelSyncEntry { s: ChannelSyncState; at: number; }
+
+/**
+ * A channels answer. `error` is a short word: "not_linked" (keep the choices
+ * here only), "salt_changed" (the list was reset: fetch again), "rejected"
+ * (400/413: these changes will never be taken), "rate_limited", "unavailable"
+ * (5xx or an answer that makes no sense), "network" (no answer: offline, a
+ * timeout). Never remote prose.
+ */
+export type RelayChannelsResult =
+    | { ok: true; salt: string; ch?: Record<string, ChannelSyncEntry>; now?: number; }
+    | { ok: false; error: "not_linked" | "salt_changed" | "rejected" | "rate_limited" | "unavailable" | "network"; status?: number; };
+
+const CHANNEL_HASH_RE = /^[0-9a-f]{16}$/;
+const CHANNEL_STATES: readonly string[] = ["on", "off", "default"];
+
+/** The entries of an answer, each checked; anything malformed is left out. */
+export function cleanChannelEntries(raw: unknown): Record<string, ChannelSyncEntry> {
+    const out: Record<string, ChannelSyncEntry> = {};
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+    for (const [h, v] of Object.entries(raw as Record<string, unknown>)) {
+        if (!CHANNEL_HASH_RE.test(h) || !v || typeof v !== "object") continue;
+        const { s, at } = v as { s?: unknown; at?: unknown; };
+        if (typeof s === "string" && CHANNEL_STATES.includes(s) && typeof at === "number" && Number.isFinite(at) && at >= 0) {
+            out[h] = { s: s as ChannelSyncState, at };
+        }
+    }
+    return out;
+}
+
+/**
+ * GET /v1/channels (no `bodyJson`) or POST it (`bodyJson`). Never throws,
+ * never rejects.
+ */
+export async function fetchRelayChannels(
+    credential: string,
+    install: string,
+    bodyJson?: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = CHANNELS_TIMEOUT_MS
+): Promise<RelayChannelsResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_CHANNELS_URL, bodyJson === undefined
+            ? { method: "GET", headers: relayHeaders(credential, install), signal: controller.signal }
+            : { method: "POST", headers: relayHeaders(credential, install, true), body: bodyJson, signal: controller.signal });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (res.ok && body && body.ok === true && typeof body.salt === "string" && CHANNEL_HASH_RE.test(body.salt)) {
+            return {
+                ok: true,
+                salt: body.salt,
+                ...(bodyJson === undefined ? { ch: cleanChannelEntries(body.ch) } : {}),
+                ...(positive(body.now) ? { now: body.now } : {})
+            };
+        }
+        const word = body && typeof body.error === "string" ? body.error : "";
+        const error = res.status === 409 && word === "not_linked" ? "not_linked"
+            : res.status === 409 && word === "salt_changed" ? "salt_changed"
+                : res.status === 400 || res.status === 413 ? "rejected"
+                    : res.status === 429 ? "rate_limited"
+                        : "unavailable";
+        return { ok: false, error, status: res.status };
+    } catch {
+        return { ok: false, error: "network" };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * THE SUBLINE SETTINGS OF A LINKED ACCOUNT (relay/src/prefs.ts). GET answers
+ * the account's settings (key -> { value, at }); POST `{ prefs }` merges them
+ * in (last write wins per setting) and answers the merged settings.
+ */
+export const RELAY_PREFS_URL = "https://relay.subline.page/v1/prefs";
+/** Sync is background work: a stalled call gives way, and the next sync tries again. */
+export const PREFS_TIMEOUT_MS = 10_000;
+
+/**
+ * A prefs answer. `error` is a short word: "not_linked" (keep the settings
+ * here only), "rejected" (400/413: never taken), "rate_limited", "missing"
+ * (404: a relay without this endpoint yet), "unavailable" (5xx or an answer
+ * that makes no sense), "network" (no answer: offline, a timeout). Never
+ * remote prose.
+ */
+export type RelayPrefsResult =
+    | { ok: true; prefs: Partial<Record<PrefKey, PrefEntry>>; now?: number; }
+    | { ok: false; error: "not_linked" | "rejected" | "rate_limited" | "missing" | "unavailable" | "network"; status?: number; };
+
+/**
+ * GET /v1/prefs (no `bodyJson`) or POST it (`bodyJson`). Unknown or
+ * malformed settings in the answer are left out. Never throws, never rejects.
+ */
+export async function fetchRelayPrefs(
+    credential: string,
+    install: string,
+    bodyJson?: string,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = PREFS_TIMEOUT_MS
+): Promise<RelayPrefsResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_PREFS_URL, bodyJson === undefined
+            ? { method: "GET", headers: relayHeaders(credential, install), signal: controller.signal }
+            : { method: "POST", headers: relayHeaders(credential, install, true), body: bodyJson, signal: controller.signal });
+        let body: any = null;
+        try { body = await res.json(); } catch { /* fall through */ }
+        if (res.ok && body && body.ok === true && body.prefs && typeof body.prefs === "object" && !Array.isArray(body.prefs)) {
+            return { ok: true, prefs: cleanPrefEntries(body.prefs), ...(positive(body.now) ? { now: body.now } : {}) };
+        }
+        const word = body && typeof body.error === "string" ? body.error : "";
+        const error = res.status === 409 && word === "not_linked" ? "not_linked"
+            : res.status === 400 || res.status === 413 ? "rejected"
+                : res.status === 404 ? "missing"
+                    : res.status === 429 ? "rate_limited"
+                        : "unavailable";
+        return { ok: false, error, status: res.status };
+    } catch {
+        return { ok: false, error: "network" };
+    } finally {
+        clearTimeout(timer);
+    }
 }

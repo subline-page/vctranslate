@@ -40,13 +40,40 @@ export interface Entitlement {
      * answers for the new pair. Absent on answers stored by older builds.
      */
     holder?: string;
+    /**
+     * API 3: whether this install's account was linked to a Discord account
+     * when the relay answered. False is the relay's "link first" (nothing is
+     * owned until then); absent is "not stated" (an older relay or build).
+     */
+    linked?: boolean;
+    /**
+     * API 3, not linked, and this computer had the plan before 0.2.8 (a prior
+     * payer): the plan works as stated, and the Link bar asks to link. Never
+     * a block. Absent otherwise.
+     */
+    mustLink?: boolean;
+    /**
+     * API 3, not linked: a purchase was started from this install before
+     * 0.2.8 and may still land. It joins the account the link names, so that
+     * link asks the account confirm first. Absent otherwise.
+     */
+    pendingPurchase?: boolean;
 }
 
+/**
+ * The install id from before keeps its answer here (the key older builds
+ * wrote): every Discord account shares it until a confirmed link binds that
+ * id to one account (account.ts). An account on an id of its own has its
+ * own key beside it (index.tsx, through setEntitlementKey), so one account
+ * never reads, or overwrites, another's answer.
+ */
 export const ENTITLEMENT_KEY = "VcTranslate_entitlement";
 /** How often a running install asks the relay again. */
 export const ENTITLEMENT_REFRESH_MS = 24 * 60 * 60_000;
 
 let current: Entitlement | null = null;
+/** Where the current account's answer lives (see ENTITLEMENT_KEY). */
+let storageKey = ENTITLEMENT_KEY;
 /** The fingerprint of the code and install id in use now, once known. */
 let currentHolder: string | null = null;
 
@@ -96,23 +123,43 @@ export function parseEntitlement(raw: unknown): Entitlement | null {
     if (finite(o.aiUntil) && o.aiUntil > 0) out.aiUntil = o.aiUntil;
     if (typeof o.token === "string" && o.token.length <= 4096) out.token = o.token;
     if (typeof o.holder === "string" && o.holder.length <= 64) out.holder = o.holder;
+    if (typeof o.linked === "boolean") out.linked = o.linked;
+    if (o.mustLink === true) out.mustLink = true;
+    if (o.pendingPurchase === true) out.pendingPurchase = true;
     return out;
+}
+
+/**
+ * Point at another account's store (a Discord account switch). What is in
+ * memory belongs to the previous account, so it is dropped at once; the
+ * caller then reads the new store with loadEntitlement.
+ */
+export function setEntitlementKey(key: string): void {
+    if (key === storageKey) return;
+    storageKey = key;
+    current = null;
+    notify();
 }
 
 /** Read what the last session stored. A bad or missing value is "none". */
 export async function loadEntitlement(): Promise<void> {
+    const key = storageKey;
+    let read: Entitlement | null;
     try {
-        current = parseEntitlement(await DataStore.get<unknown>(ENTITLEMENT_KEY));
+        read = parseEntitlement(await DataStore.get<unknown>(key));
     } catch {
-        current = null;
+        read = null;
     }
+    // Switched again while reading: this answer is not the current account's.
+    if (key !== storageKey) return;
+    current = read;
     notify();
 }
 
 /** Record the relay's answer (in memory and on disk). */
 export function setEntitlement(next: Entitlement | null): void {
     current = next;
-    void DataStore.set(ENTITLEMENT_KEY, next ?? undefined).catch(() => { });
+    void DataStore.set(storageKey, next ?? undefined).catch(() => { });
     notify();
 }
 
@@ -136,6 +183,46 @@ export function entitlementLevel(now: number = Date.now()): Level {
     return e.automatic ? "automatic" : "none";
 }
 
+/**
+ * Whether the relay last said this install's account is linked to a Discord
+ * account: "unlinked" (link first, nothing is owned), "linked", or "unknown"
+ * (no answer yet, an older relay, or an answer about another code or install).
+ * Unlike the level, it does not lapse at tokenExpiresAt: it is a fact about
+ * the account, not a permission.
+ */
+export function linkState(): "linked" | "unlinked" | "unknown" {
+    const e = current;
+    if (e === null || e.linked === undefined) return "unknown";
+    if (e.holder !== undefined && currentHolder !== null && e.holder !== currentHolder) return "unknown";
+    return e.linked ? "linked" : "unlinked";
+}
+
+/**
+ * A prior payer still to link (0.2.8): the relay answered the plan as usual,
+ * with `mustLink`. Translation keeps working; the Link bar shows. False for
+ * an answer about another code or install, as linkState says "unknown" then.
+ */
+export function mustLink(): boolean {
+    const e = current;
+    if (e === null || e.mustLink !== true || e.linked !== false) return false;
+    if (e.holder !== undefined && currentHolder !== null && e.holder !== currentHolder) return false;
+    return true;
+}
+
+/**
+ * The relay said a purchase was started from this install before 0.2.8 and
+ * has not landed (`pendingPurchase`), while it is not linked. Its plan will
+ * join whichever account links this install: the Link asks the account
+ * confirm first, and is never made silently (0.2.8 spec, decisions 2 and 3).
+ * False for an answer about another code or install, as mustLink.
+ */
+export function purchaseStartedHere(): boolean {
+    const e = current;
+    if (e === null || e.pendingPurchase !== true || e.linked !== false) return false;
+    if (e.holder !== undefined && currentHolder !== null && e.holder !== currentHolder) return false;
+    return true;
+}
+
 export function subscribeEntitlement(fn: () => void): () => void {
     listeners.add(fn);
     return () => { listeners.delete(fn); };
@@ -151,5 +238,6 @@ function notify(): void {
 export function __resetEntitlement(): void {
     current = null;
     currentHolder = null;
+    storageKey = ENTITLEMENT_KEY;
     listeners.clear();
 }

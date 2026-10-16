@@ -11,8 +11,8 @@
  *
  * WHAT IS NEVER TOUCHED: code (``` blocks and `inline`), links, and Discord
  * markup (<@id>, <#id>, <:emote:id>, <t:123>). Those spans are cut out first
- * and put back unchanged. Usernames are never passed in at all: callers hand
- * over message content only.
+ * and put back unchanged. Message content, and since 0.2.8 people's names and
+ * pronouns (surfaces/names.ts): a "𝓓𝓶𝓲𝓽𝓻𝔂" is read as the name it spells.
  *
  * NOT a blanket NFKC. NFKC would also rewrite ordinary text people rely on:
  * Korean "ㅋㅋㅋ" becomes conjoining jamo, "½" becomes "1⁄2", "™" becomes

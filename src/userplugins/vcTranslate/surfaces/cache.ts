@@ -30,6 +30,13 @@ export interface SurfaceEntry {
     quality?: SurfaceTranslation;
     /** An engine judged it not foreign (already in the target language). */
     skip?: true;
+    /**
+     * The reader asked for this ✦ with a click on a name (0.2.8,
+     * SurfaceService.askQuality). A name in the reader's own script shows a
+     * ✦ answer only then: the same text's ✦ from a status or a title is the
+     * meaning of the words, and a name is not its meaning (decision 9).
+     */
+    asked?: true;
     /** Last written or read, epoch ms. Drives both the LRU and the age limit. */
     at: number;
 }
@@ -88,6 +95,7 @@ function isEntry(v: unknown): v is SurfaceEntry {
     if (o.fast !== undefined && !isTranslation(o.fast)) return false;
     if (o.quality !== undefined && !isTranslation(o.quality)) return false;
     if (o.skip !== undefined && o.skip !== true) return false;
+    if (o.asked !== undefined && o.asked !== true) return false;
     return o.fast !== undefined || o.quality !== undefined || o.skip === true;
 }
 
@@ -127,8 +135,11 @@ export class SurfaceCache {
         return entry;
     }
 
-    /** Merge a verdict into an entry. A ✦ is never replaced by ≈. */
-    put(key: string, patch: { fast?: SurfaceTranslation; quality?: SurfaceTranslation; skip?: true; retract?: true }): SurfaceEntry {
+    /**
+     * Merge a verdict into an entry. A ✦ is never replaced by ≈. `asked`
+     * marks the entry's ✦ as one the reader asked for (only with a ✦ there).
+     */
+    put(key: string, patch: { fast?: SurfaceTranslation; quality?: SurfaceTranslation; skip?: true; retract?: true; asked?: true }): SurfaceEntry {
         const prev = this.map.get(key);
         const next: SurfaceEntry = { ...(prev ?? {}), at: this.opts.now() };
         if (patch.quality) {
@@ -141,6 +152,7 @@ export class SurfaceCache {
         // It never removes a ✦ line.
         if (patch.skip && patch.retract && !next.quality) delete next.fast;
         if (patch.skip && !next.quality && !next.fast) next.skip = true;
+        if (patch.asked && next.quality) next.asked = true;
         this.map.delete(key);
         this.map.set(key, next);
         this.evict();

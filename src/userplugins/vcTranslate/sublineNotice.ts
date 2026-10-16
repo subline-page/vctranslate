@@ -1,7 +1,8 @@
 import { currentNotice, noticesQueue, popNotice, showNotice } from "@api/Notices";
 
 /**
- * Subline's own notices (the activation notice and the "checking" notice),
+ * Subline's own notices (the activation notice, the "checking" notice, the
+ * app update notice, and the Link bar of a prior payer, 0.2.8),
  * tracked by whether THEY are still there, not by a flag.
  *
  * WHY. Vencord's notices are one FIFO queue, and `popNotice()` dismisses
@@ -16,11 +17,11 @@ import { currentNotice, noticesQueue, popNotice, showNotice } from "@api/Notices
  * while it is on screen or still queued; the X removes it from both without
  * calling anything, which is how a close by hand is seen.
  */
-export type NoticeSlot = "activation" | "checking" | "appUpdate";
+export type NoticeSlot = "activation" | "checking" | "appUpdate" | "link";
 
 type Entry = unknown[];
 
-const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null, appUpdate: null };
+const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null, appUpdate: null, link: null };
 
 const callbackOf = (entry: unknown): unknown => Array.isArray(entry) ? (entry as Entry)[3] : undefined;
 
@@ -78,4 +79,5 @@ export function forgetNotices(): void {
     mine.activation = null;
     mine.checking = null;
     mine.appUpdate = null;
+    mine.link = null;
 }

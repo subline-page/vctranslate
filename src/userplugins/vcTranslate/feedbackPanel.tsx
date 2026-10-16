@@ -21,6 +21,7 @@ import {
 } from "./feedback";
 import { recentErrorCodes } from "./recentErrors";
 import { installIdOnce, tasteBearer } from "./taste";
+import { transport } from "./transport";
 
 const TEXT = { color: "var(--text-default, var(--text-normal, #dbdee1))" } as const;
 const MUTED = { color: "var(--text-muted)", fontSize: "0.9rem" } as const;
@@ -63,11 +64,9 @@ export function feedbackContext(report?: TranslationReport): FeedbackContext {
     };
 }
 
-/** The native call, read when Send is pressed. A missing native half is "unavailable". */
+/** The transport call, read when Send is pressed. No transport is "unavailable". */
 function nativeSend(install: string, json: string): Promise<SendResult> {
-    const native = (globalThis as any).VencordNative?.pluginHelpers?.VcTranslate;
-    if (typeof native?.relaySendFeedback !== "function") return Promise.resolve({ ok: false, error: "unavailable" });
-    return native.relaySendFeedback(install, json);
+    return transport.relaySendFeedback(install, json);
 }
 
 const SEND_DEPS = { install: async () => tasteBearer(await installIdOnce()), send: nativeSend };

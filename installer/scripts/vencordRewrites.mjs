@@ -128,3 +128,175 @@ export function carryMarkerOnHostUpdate(source) {
     });
     return out;
 }
+
+export const WEB_STUB_FILE = "browser/VencordNativeStub.ts";
+
+/** Upstream's web settings read: the browser add-on's settings.json. */
+export const WEB_SETTINGS_GET_ANCHOR = [
+    "        get: () => {",
+    "            try {",
+    "                return JSON.parse(localStorage.getItem(\"VencordSettings\") || \"{}\");",
+    "            } catch (e) {",
+    "                console.error(\"Failed to parse settings from localStorage: \", e);",
+    "                return {};",
+    "            }",
+    "        },",
+    ""
+].join("\n");
+
+const WEB_SETTINGS_GET_SEEDED = [
+    "        get: () => {",
+    "            let sublineStored = {};",
+    "            try {",
+    "                sublineStored = JSON.parse(localStorage.getItem(\"VencordSettings\") || \"{}\");",
+    "            } catch (e) {",
+    "                console.error(\"Failed to parse settings from localStorage: \", e);",
+    "            }",
+    "            sublineSettingsBase = JSON.parse(JSON.stringify(sublineStored));",
+    "            return sublineSeedSettings(sublineStored);",
+    "        },",
+    ""
+].join("\n");
+
+/** Upstream's web settings write: the whole object this tab holds, over whatever is stored. */
+export const WEB_SETTINGS_SET_ANCHOR = "        set: async (s: Settings) => localStorage.setItem(\"VencordSettings\", JSON.stringify(s)),\n";
+
+const WEB_SETTINGS_SET_MERGED = "        set: async (s: Settings) => sublineWriteSettings(s),\n";
+
+/**
+ * The browser add-on's version of what the installer writes into Vencord's
+ * settings.json on the desktop: `plugins.VcTranslate.enabled = true`, merged,
+ * nothing else touched (language.ts setTargetLanguage). The add-on has no
+ * installer, so the web settings store seeds it on every read instead. The
+ * reading language and the install id need no seed: the plugin defaults the
+ * first from Discord's locale and makes the second itself (taste.ts).
+ *
+ * Plain JavaScript (no type syntax), so a test can execute it as is. Never
+ * throws: a stored value that is not an object becomes a fresh one, which is
+ * what upstream does with settings it cannot parse.
+ */
+export const WEB_SEED_BLOCK = [
+    "",
+    "// Subline: the plugin is on by default, as the desktop installer seeds it.",
+    "function sublineSeedSettings(stored) {",
+    "    const isObject = v => v !== null && typeof v === \"object\" && !Array.isArray(v);",
+    "    const root = isObject(stored) ? stored : {};",
+    "    if (!isObject(root.plugins)) root.plugins = {};",
+    "    if (!isObject(root.plugins.VcTranslate)) root.plugins.VcTranslate = {};",
+    "    root.plugins.VcTranslate.enabled = true;",
+    "    return root;",
+    "}",
+    "",
+    "// Subline: two Discord tabs share one stored settings object, and each",
+    "// writes the WHOLE object it holds on every change. A code saved in one tab",
+    "// was lost when the other wrote. Each write is merged instead: what this tab",
+    "// changed since it last read or wrote wins, and every other value stays as",
+    "// stored (another tab may have changed it). The base is what this tab's own",
+    "// copy held at its last read or write, so a value it never saw stays stale",
+    "// in its copy and is never written back.",
+    "var sublineSettingsBase = null;",
+    "function sublineMergeSettings(base, mine, theirs) {",
+    "    const isObject = v => v !== null && typeof v === \"object\" && !Array.isArray(v);",
+    "    if (!isObject(base) || !isObject(mine) || !isObject(theirs)) return mine;",
+    "    const out = {};",
+    "    for (const k of new Set([...Object.keys(theirs), ...Object.keys(mine), ...Object.keys(base)])) {",
+    "        const b = base[k], m = mine[k], t = theirs[k];",
+    "        let v;",
+    "        if (isObject(m) && isObject(t)) v = sublineMergeSettings(isObject(b) ? b : {}, m, t);",
+    "        // New here and already stored by another tab: a default this tab filled in, not a choice.",
+    "        else if (b === undefined && t !== undefined) v = t;",
+    "        else if (JSON.stringify(m) !== JSON.stringify(b)) v = m;",
+    "        else v = t;",
+    "        if (v !== undefined) out[k] = v;",
+    "    }",
+    "    return out;",
+    "}",
+    "function sublineWriteSettings(mine) {",
+    "    let merged = mine;",
+    "    try {",
+    "        const theirs = JSON.parse(localStorage.getItem(\"VencordSettings\") || \"{}\");",
+    "        if (sublineSettingsBase !== null) merged = sublineMergeSettings(sublineSettingsBase, JSON.parse(JSON.stringify(mine)), theirs);",
+    "    } catch (e) {",
+    "        console.error(\"[Subline] Could not merge settings with another tab's, writing this tab's: \", e);",
+    "    }",
+    "    localStorage.setItem(\"VencordSettings\", JSON.stringify(merged));",
+    "    sublineSettingsBase = JSON.parse(JSON.stringify(mine));",
+    "}",
+    ""
+].join("\n");
+
+/**
+ * VencordNativeStub.ts with the plugin enabled by default, and settings
+ * writes merged with other tabs' (browser add-on only).
+ */
+export function seedWebSettings(source) {
+    let out = rewriteExactlyOnce(source, WEB_SETTINGS_GET_ANCHOR, WEB_SETTINGS_GET_SEEDED, {
+        file: WEB_STUB_FILE,
+        what: "settings.get block"
+    });
+    out = rewriteExactlyOnce(out, WEB_SETTINGS_SET_ANCHOR, WEB_SETTINGS_SET_MERGED, {
+        file: WEB_STUB_FILE,
+        what: "settings.set line"
+    });
+    return out + WEB_SEED_BLOCK;
+}
+
+/*
+ * TWO VENCORDS IN ONE TAB. The add-on runs a whole Vencord in every Discord
+ * frame, at document_start, in the page's world, exactly as Vencord's own
+ * browser add-on (Vencord Web) and its userscript do. Each Vencord hooks
+ * Discord's webpack by replacing one setter, so with two only the LAST one to
+ * load works; the other silently does nothing, and the two overwrite each
+ * other's stored settings. Load order between add-ons is not fixed.
+ *
+ * So the built bundle (dist/Vencord.js) checks first: another Vencord already
+ * here, and Subline's does not start at all (Discord and the other Vencord
+ * run as they would alone). Another one that starts after Subline's is seen
+ * once the page has loaded. Either way the reader is told, on the page and
+ * in the console, which is what was missing: nothing said why Subline did
+ * nothing.
+ *
+ * SUBLINE'S OWN EARLIER COPY. Firefox runs an enabled or updated add-on's
+ * content scripts again in tabs that are already open (Chromium does not), and
+ * page-world JavaScript cannot be unloaded, so the new bundle finds the old
+ * Subline's Vencord in the page. Each Subline bundle marks its own Vencord
+ * (`window.__sublineVencord`), so that case says "updated, reload" instead of
+ * blaming a Vencord the reader does not have.
+ */
+
+/** The start of Vencord's web bundle (esbuild, IIFE, globalName Vencord). */
+export const WEB_BUNDLE_HEAD = "\"use strict\";var Vencord=";
+/** The end of its one statement, before the source URL comment. */
+export const WEB_BUNDLE_TAIL = "})();\n//# sourceURL=file:///VencordWeb";
+
+export const SECOND_VENCORD_COPY = "Subline is off in this tab because another Vencord is running here (Vencord Web or its userscript). Turn one of them off, then reload Discord.";
+
+/** The add-on was updated under an open tab: the app's own ADDON_RELOAD_COPY.notice (upgradeCopy.ts). */
+export const SUBLINE_UPDATED_COPY = "Subline was updated. Reload this tab to keep translating.";
+
+const SECOND_VENCORD_NOTICE = [
+    "function sublineSecondVencord(m){",
+    `m=m||${JSON.stringify(SECOND_VENCORD_COPY)};`,
+    "console.error(\"[Subline] \"+m);",
+    "var show=function(){try{",
+    "var d=document.createElement(\"div\");d.setAttribute(\"role\",\"alert\");d.textContent=m;",
+    "d.style.cssText=\"position:fixed;z-index:2147483647;left:16px;right:16px;bottom:16px;padding:12px 16px;border-radius:8px;background:#1e1f22;color:#f2f3f5;font:14px/1.4 sans-serif;cursor:pointer\";",
+    "d.addEventListener(\"click\",function(){d.remove()});document.body.appendChild(d)",
+    "}catch(e){console.error(\"[Subline] Could not show the notice\",e)}};",
+    "if(document.body)show();else document.addEventListener(\"DOMContentLoaded\",show,{once:!0})}"
+].join("");
+
+/** Vencord's built web bundle, with the second-Vencord check around it (see above). */
+export function guardSecondVencord(bundle) {
+    let out = rewriteExactlyOnce(bundle, WEB_BUNDLE_HEAD,
+        `"use strict";${SECOND_VENCORD_NOTICE}if(window.Vencord!==void 0)sublineSecondVencord(window.Vencord===window.__sublineVencord?${JSON.stringify(SUBLINE_UPDATED_COPY)}:void 0);else{var Vencord=`, {
+            file: "dist/Vencord.js",
+            what: "bundle start"
+        });
+    out = rewriteExactlyOnce(out, WEB_BUNDLE_TAIL,
+        "})();(function(){var own=Vencord;window.__sublineVencord=own;document.addEventListener(\"DOMContentLoaded\",function(){if(window.Vencord!==own)sublineSecondVencord()},{once:!0})})();}\n//# sourceURL=file:///VencordWeb", {
+            file: "dist/Vencord.js",
+            what: "bundle end"
+        });
+    return out;
+}

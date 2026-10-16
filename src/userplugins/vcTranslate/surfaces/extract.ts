@@ -3,9 +3,14 @@
  * (the message record, the presence and profile stores, the channel record).
  *
  * Pure functions over loosely typed input: Discord's shapes drift, so every
- * field is read defensively and a missing one simply yields no text. Nothing
- * here ever returns a username, display name, nickname, or a server or
- * channel NAME. Thread and forum post titles are the one exception the
+ * field is read defensively and a missing one simply yields no text.
+ *
+ * PEOPLE'S NAMES ARE NOT HERE. Since 0.2.8 a display name, server nickname,
+ * username and pronouns ARE translated, but never as a line among these
+ * texts: they have their own rules and their own look (a hover, and a small
+ * line on the profile card), see names.ts and namesUi.tsx. Nothing here ever
+ * returns a person's name, and nothing anywhere translates a server, channel
+ * or role NAME. Thread and forum post titles are the one exception the
  * product asks for: a thread's name is its title.
  */
 

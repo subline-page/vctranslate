@@ -48,7 +48,12 @@ let installIdPending: Promise<string> | null = null;
 /** Shaped exactly as the relay's bearer requires, so a bad id cannot be reused. */
 const INSTALL_ID_RE = /^[0-9a-f]{32}$/;
 
-function newInstallId(): string {
+/** Whether `value` is shaped like an install id (32 lowercase hex). */
+export function isInstallId(value: unknown): value is string {
+    return typeof value === "string" && INSTALL_ID_RE.test(value);
+}
+
+export function newInstallId(): string {
     const bytes = new Uint8Array(16);
     // crypto.getRandomValues, not Math.random: this is the only thing standing
     // between one install and another install's count. Reached through
@@ -97,52 +102,128 @@ export function knownInstallId(): string | null {
     return installId;
 }
 
+/**
+ * PER DISCORD ACCOUNT (0.2.8). A plan belongs to one Discord account, and the
+ * relay links an INSTALL to that account, so two Discord accounts on one
+ * computer need two install ids: otherwise the second account would be
+ * answered with the first one's plan. index.tsx resolves the install id for
+ * the signed-in account (account.ts) and hands it over here. While that is
+ * required (requireAccount) and no account has resolved yet, installIdOnce
+ * WAITS: nothing may ask the relay under an id that may belong to someone
+ * else. The installer's id (and the one older builds kept,
+ * resolveLegacyInstallId) is shared by every account until a confirmed link
+ * binds it to one account (account.ts); never to whichever signs in first.
+ */
+let accountRequired = false;
+let waitingForAccount: ((id: string) => void)[] = [];
+
+/** On while the plugin runs (index.tsx): install ids come from the signed-in account. */
+export function requireAccount(on: boolean): void {
+    accountRequired = on;
+}
+
+/** The Discord account is changing: nothing may use the previous one's id. */
+export function forgetInstallId(): void {
+    installId = null;
+    installIdPending = null;
+}
+
+/** The signed-in account's install id. Wakes everything waiting for one. */
+export function useInstallId(id: string): void {
+    installId = id;
+    installIdPending = null;
+    const waiting = waitingForAccount;
+    waitingForAccount = [];
+    for (const wake of waiting) wake(id);
+}
+
 export async function installIdOnce(): Promise<string> {
     if (installId !== null) return installId;
+    if (accountRequired) return new Promise<string>(resolve => { waitingForAccount.push(resolve); });
     if (installIdPending !== null) return installIdPending;
-
-    installIdPending = (async () => {
-        const seeded = settingId();
-        if (seeded !== null) {
-            installId = seeded;
-            try {
-                if (await DataStore.get<unknown>(INSTALL_ID_KEY) !== seeded) await DataStore.set(INSTALL_ID_KEY, seeded);
-            } catch { /* the setting holds it */ }
-            return seeded;
-        }
-        let stored: unknown;
-        try {
-            stored = await DataStore.get<unknown>(INSTALL_ID_KEY);
-        } catch {
-            // A failed read degrades to a fresh id for this session rather
-            // than to a broken ⚡ button. The worst case is one install being
-            // counted twice.
-            stored = undefined;
-        }
-        // Re-validated rather than trusted: anything that is not the shape the
-        // relay's bearer requires would be rejected on every press forever,
-        // with no way for the user to clear it.
-        if (typeof stored === "string" && INSTALL_ID_RE.test(stored)) {
-            installId = stored;
-            // An id that was here before the installer-seeded setting: this
-            // install was used before 0.2.0 (see priorUseHint).
-            if (installIdSetting !== null) await notePriorUse();
-            writeSettingId(stored);
-            return stored;
-        }
-        const fresh = newInstallId();
-        try {
-            await DataStore.set(INSTALL_ID_KEY, fresh);
-        } catch {
-            // Same reasoning: an id that could not be persisted still works
-            // for this session; the next launch simply generates another.
-        }
-        installId = fresh;
-        writeSettingId(fresh);
-        return fresh;
-    })();
-
+    installIdPending = resolveLegacyInstallId().then(id => {
+        installId = id;
+        return id;
+    });
     return installIdPending;
+}
+
+/**
+ * The installer's id, else the one this store kept, else a fresh one, kept
+ * in both places. What every install had before ids were per account: every
+ * Discord account here shares it until a confirmed link binds it to one
+ * account (account.ts).
+ */
+export async function resolveLegacyInstallId(): Promise<string> {
+    const seeded = settingId();
+    if (seeded !== null) {
+        try {
+            if (await DataStore.get<unknown>(INSTALL_ID_KEY) !== seeded) await DataStore.set(INSTALL_ID_KEY, seeded);
+        } catch { /* the setting holds it */ }
+        return seeded;
+    }
+    let stored: unknown;
+    try {
+        stored = await DataStore.get<unknown>(INSTALL_ID_KEY);
+    } catch {
+        // A failed read degrades to a fresh id for this session rather
+        // than to a broken ⚡ button. The worst case is one install being
+        // counted twice.
+        stored = undefined;
+    }
+    // Re-validated rather than trusted: anything that is not the shape the
+    // relay's bearer requires would be rejected on every press forever,
+    // with no way for the user to clear it.
+    if (typeof stored === "string" && INSTALL_ID_RE.test(stored)) {
+        // An id that was here before the installer-seeded setting: this
+        // install was used before 0.2.0 (see priorUseHint).
+        if (installIdSetting !== null) await notePriorUse();
+        writeSettingId(stored);
+        return stored;
+    }
+    const fresh = newInstallId();
+    try {
+        await DataStore.set(INSTALL_ID_KEY, fresh);
+    } catch {
+        // Same reasoning: an id that could not be persisted still works
+        // for this session; the next launch simply generates another.
+    }
+    writeSettingId(fresh);
+    return fresh;
+}
+
+/** The installer's id as the setting holds it now, or null (account.ts: a reinstall seeds a new one). */
+export function seededInstallId(): string | null {
+    return settingId();
+}
+
+/**
+ * WHOSE store the per-install state below is read from and written to: ""
+ * for the install id from before (the keys older builds wrote, shared by
+ * every account until a confirmed link binds that id to one), else the
+ * account's own key (account.ts). The early-user hint, its check and the local
+ * ✦ count are facts about one account's install, so a second account starts
+ * from nothing rather than from the first one's.
+ */
+let scope = "";
+
+function scoped(key: string): string {
+    return scope === "" ? key : `${key}:${scope}`;
+}
+
+/**
+ * Switch to another account's store. The counts held in memory were the
+ * previous account's, so they are dropped; index.tsx reads the new
+ * account's local count back (loadLocalTasteCount) and asks the relay.
+ */
+export function setTasteScope(next: string): void {
+    if (next === scope) return;
+    scope = next;
+    used = null;
+    cap = TASTE_CAP;
+    readDay = null;
+    localDay = null;
+    localUsed = 0;
 }
 
 /* --------------------------------------------------------- prior use -- */
@@ -173,17 +254,19 @@ async function notePriorUse(): Promise<void> {
 /** Whether to send x-subline-prior on the next status call. */
 export async function priorUseHint(localTrialStartedAt: unknown): Promise<boolean> {
     let mark: unknown;
-    try { mark = await DataStore.get<unknown>(PRIOR_USE_KEY); } catch { mark = undefined; }
+    try { mark = await DataStore.get<unknown>(scoped(PRIOR_USE_KEY)); } catch { mark = undefined; }
     if (mark === "done") return false;
     // "sent" is what 0.2.0 release candidates wrote after any answer; it still
     // means local evidence was found, so the hint goes on.
     if (mark === "pending" || mark === "sent") return true;
+    // The old local trial belongs to the install id from before (scope "").
+    if (scope !== "") return false;
     return typeof localTrialStartedAt === "number" && Number.isFinite(localTrialStartedAt) && localTrialStartedAt > 0;
 }
 
 /** The relay answered automatic:true: this install needs no hint again. */
 export function markPriorHintDone(): void {
-    void DataStore.set(PRIOR_USE_KEY, "done").catch(() => { });
+    void DataStore.set(scoped(PRIOR_USE_KEY), "done").catch(() => { });
 }
 
 /* ------------------------------------------------ early-user checking -- */
@@ -202,16 +285,16 @@ export const EARLY_CHECK_MS = 24 * 60 * 60_000;
 /** When the early-user check began (recording now if it had not), or null once it is over. */
 export async function earlyCheckSince(now: number): Promise<number | null> {
     let v: unknown;
-    try { v = await DataStore.get<unknown>(EARLY_CHECK_KEY); } catch { v = undefined; }
+    try { v = await DataStore.get<unknown>(scoped(EARLY_CHECK_KEY)); } catch { v = undefined; }
     if (v === "over") return null;
     if (typeof v === "number" && Number.isFinite(v)) return v;
-    void DataStore.set(EARLY_CHECK_KEY, now).catch(() => { });
+    void DataStore.set(scoped(EARLY_CHECK_KEY), now).catch(() => { });
     return now;
 }
 
 /** The relay gave a definitive answer to a hinted request: the check is over. */
 export function endEarlyCheck(): void {
-    void DataStore.set(EARLY_CHECK_KEY, "over").catch(() => { });
+    void DataStore.set(scoped(EARLY_CHECK_KEY), "over").catch(() => { });
 }
 
 /** The Authorization bearer for a taste request. */
@@ -322,7 +405,7 @@ function localUsedToday(now: number): number {
 /** Read the persisted local count. A bad or missing value is a zero. */
 export async function loadLocalTasteCount(): Promise<void> {
     try {
-        const raw = await DataStore.get<unknown>(LOCAL_TASTE_KEY) as { day?: unknown; used?: unknown } | undefined;
+        const raw = await DataStore.get<unknown>(scoped(LOCAL_TASTE_KEY)) as { day?: unknown; used?: unknown } | undefined;
         if (raw && typeof raw.day === "string" && typeof raw.used === "number" && Number.isFinite(raw.used) && raw.used >= 0) {
             localDay = raw.day;
             localUsed = Math.floor(raw.used);
@@ -335,7 +418,7 @@ export function noteTasteSpent(now: number = Date.now()): void {
     const day = relayDay(now);
     if (localDay !== day) { localDay = day; localUsed = 0; }
     localUsed++;
-    void DataStore.set(LOCAL_TASTE_KEY, { day: localDay, used: localUsed }).catch(() => { });
+    void DataStore.set(scoped(LOCAL_TASTE_KEY), { day: localDay, used: localUsed }).catch(() => { });
 }
 
 export function tasteUsed(now: number = Date.now()): number {
@@ -368,4 +451,7 @@ export function __resetTaste(): void {
     localDay = null;
     localUsed = 0;
     relaySkew = 0;
+    scope = "";
+    accountRequired = false;
+    waitingForAccount = [];
 }

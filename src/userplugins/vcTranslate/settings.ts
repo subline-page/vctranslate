@@ -1,12 +1,19 @@
 import { definePluginSettings } from "@api/Settings";
 import { OptionType } from "@utils/types";
-import { LocaleStore, React } from "@webpack/common";
+import { LocaleStore, React, UserStore } from "@webpack/common";
 
 
-import { entitlementLevel, type Level, subscribeEntitlement } from "./entitlement";
+import { APP_DOWNLOAD_URL } from "./appNotice";
+import { entitlementLevel, type Level, linkState, mustLink, subscribeEntitlement } from "./entitlement";
 import { type LanguageSelectOption, targetLanguageOptions } from "./languages";
-import { isPaymentPending, openCodeEntryFromSettings, openUpgrade, subscribePaymentPending } from "./upgradeBridge";
+import { isDesktop } from "./transport";
+import {
+    canFinishMoveFromSettings, canMoveFromSettings, isPaymentPending, openCodeEntryFromSettings, openFinishMoveFromSettings, openLinkFromSettings,
+    noteSettingsShown, openMoveFromSettings, openUpgrade, subscribePaymentPending
+} from "./upgradeBridge";
+import { LINK_COPY, MOVE_COPY } from "./upgradeCopy";
 import { FeedbackSection } from "./feedbackPanel";
+import { notePrefChanged } from "./prefs";
 import { notifySettingsChanged } from "./settingsBridge";
 import { SETTINGS_COPY } from "./settingsCopy";
 import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
@@ -77,21 +84,62 @@ function link(text: string, onClick: () => void) {
     }, text);
 }
 
+/** The signed-in Discord username, read locally (never sent anywhere), or "". */
+function signedInName(): string {
+    try {
+        const name = UserStore?.getCurrentUser?.()?.username;
+        return typeof name === "string" ? name : "";
+    } catch {
+        return "";
+    }
+}
+
 /**
- * The plan card at the top of the page: what this install has, the saved code
- * with a Copy button (so a buyer can take it to another computer), and the one
- * action that helps: Activate / Enter a code when there is nothing, Add AI for
- * an Automatic owner. Redraws when the relay's answer changes.
+ * The plan card at the top of the page: which Discord account Subline is
+ * linked to, what it has, the saved code (selectable, no Copy button), and the action
+ * that helps: Link while the account is not linked; Buy Automatic / Enter a
+ * code when there is nothing; Add AI for an Automatic owner. Redraws when the
+ * relay's answer changes. 0.2.8: a plan from before still to link says so
+ * (its plan works); the account that has the plan can move it; in the
+ * browser add-on, the Discord app is offered. Never throws into Discord:
+ * Vencord's settings page draws it inside its own error boundary, and this
+ * reads everything defensively.
  */
 export function PlanCard() {
     const [, redraw] = React.useReducer((n: number) => n + 1, 0);
     React.useEffect(() => subscribeEntitlement(redraw), []);
     React.useEffect(() => subscribePaymentPending(redraw), []);
+    // On screen: what its links start says its outcome in a window (a toast is drawn under this page).
+    React.useEffect(() => noteSettingsShown(), []);
     const level = entitlementLevel();
+    const linked = linkState();
     const raw = settings.store.sublineCode;
     const code = typeof raw === "string" ? raw.trim() : "";
     const muted = { color: "var(--text-muted)", fontSize: "0.9rem" };
-    const rows: any[] = [React.createElement("div", { key: "plan", style: { color: "var(--text-default, var(--text-normal))" } }, planLine(level))];
+    const normal = { color: "var(--text-default, var(--text-normal))" };
+    // A move started on another account here waits for this one: finish it (Move my plan).
+    const finishMove = () => canFinishMoveFromSettings()
+        ? React.createElement("div", { key: "finishMove", style: { ...muted, marginTop: 4 }, "data-subline-finish-move": "" }, link(MOVE_COPY.finishLink, openFinishMoveFromSettings))
+        : null;
+    // Not linked (and so nothing owned): one line and Link. Nothing else helps yet.
+    if (linked === "unlinked" && level === "none") {
+        return React.createElement("div", { style: { marginBottom: 8 } },
+            React.createElement("div", { key: "plan", style: normal }, SETTINGS_COPY.plan.notLinked),
+            React.createElement("div", { key: "actions", style: { ...muted, marginTop: 4 } }, link(SETTINGS_COPY.plan.link, openLinkFromSettings)),
+            finishMove()
+        );
+    }
+    const rows: any[] = [];
+    const name = signedInName();
+    if (linked === "linked" && name !== "") {
+        rows.push(React.createElement("div", { key: "account", style: normal, "data-subline-linked": "" }, SETTINGS_COPY.plan.linkedTo.replace("{name}", name)));
+    }
+    // A plan from before, not linked yet: it works; linking keeps it everywhere.
+    if (mustLink()) {
+        rows.push(React.createElement("div", { key: "mustLink", style: { ...muted, marginBottom: 4 }, "data-subline-must-link": "" },
+            LINK_COPY.mustLinkNotice, ". ", link(SETTINGS_COPY.plan.link, openLinkFromSettings)));
+    }
+    rows.push(React.createElement("div", { key: "plan", style: normal }, planLine(level)));
     if (code !== "") {
         rows.push(React.createElement("div", { key: "code", style: { ...muted, display: "flex", gap: 8, alignItems: "center", marginTop: 4 } },
             SETTINGS_COPY.plan.codeLabel, " ",
@@ -105,10 +153,37 @@ export function PlanCard() {
     const buy = (text: string) => isPaymentPending()
         ? React.createElement("span", { "data-subline-payment-pending": "" }, SETTINGS_COPY.plan.paymentPending)
         : link(text, openUpgrade);
-    if (level === "none") actions.push(buy(SETTINGS_COPY.plan.activate), " · ", link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
+    if (level === "none") actions.push(buy(SETTINGS_COPY.plan.buyAutomatic), " · ", link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
     else if (level === "automatic") actions.push(buy(SETTINGS_COPY.plan.addAi));
     if (actions.length > 0) rows.push(React.createElement("div", { key: "actions", style: { ...muted, marginTop: 4 } }, ...actions));
+    const finishing = finishMove();
+    if (finishing !== null) rows.push(finishing);
+    // Move my plan: only on a linked computer of the account that has it.
+    if (canMoveFromSettings()) {
+        rows.push(React.createElement("div", { key: "move", style: { ...muted, marginTop: 4 }, "data-subline-move": "" }, link(MOVE_COPY.settingsLink, openMoveFromSettings)));
+    }
+    // The browser add-on, with a plan: the Discord app too (the installer never sells).
+    if (level !== "none" && !desktop()) {
+        rows.push(React.createElement("div", { key: "app", style: { ...muted, marginTop: 4 }, "data-subline-get-app": "" },
+            SETTINGS_COPY.plan.appPrompt, " ", link(SETTINGS_COPY.plan.appLink, openAppDownload)));
+    }
     return React.createElement("div", { style: { marginBottom: 8 } }, ...rows);
+}
+
+/** Running in the Discord app (the desktop helpers are there), not the browser add-on. */
+function desktop(): boolean {
+    try {
+        return isDesktop();
+    } catch {
+        return true;
+    }
+}
+
+/** subline.page's downloads, in a new tab (the add-on) or the default browser. */
+function openAppDownload(): void {
+    try {
+        (globalThis as any).VencordNative?.native?.openExternal?.(APP_DOWNLOAD_URL);
+    } catch { /* nothing opened; the link is plain text on the site too */ }
 }
 
 export const settings = definePluginSettings({
@@ -140,7 +215,23 @@ export const settings = definePluginSettings({
         type: OptionType.CUSTOM,
         default: ""
     },
-    // First on the page: the plan, the code and its Copy button.
+    // Which Discord account (a local key, account.ts) a confirmed link bound
+    // installId to, and that id: { account, id }, or "" while none has. Kept
+    // here next to it: clearing Discord's data empties the accounts book but
+    // not this file. CUSTOM, never shown.
+    installBinding: {
+        type: OptionType.CUSTOM,
+        default: "" as unknown
+    },
+    // The local account keys that sent a link on installId while it was
+    // unbound, whose answer was not taken in yet: { id, accounts }, or "".
+    // A later status answer that says linked binds it from this (account.ts
+    // rule 3). CUSTOM, never shown.
+    installPendingBind: {
+        type: OptionType.CUSTOM,
+        default: "" as unknown
+    },
+    // First on the page: the plan and the code.
     plan: {
         type: OptionType.COMPONENT,
         component: () => React.createElement(PlanCard)
@@ -156,6 +247,20 @@ export const settings = definePluginSettings({
         // Same immediacy requirement as the API keys: effectiveEngine() must
         // see a pasted/cleared code right away, not on next reload.
         onChange: syncEngineToCode
+    },
+    // Whose the code fields (sublineCode, clearedPurchaseCode, deadCodeSeen)
+    // are: "" for the install id from before (every account until a confirmed
+    // link binds it), a local account key for an account's own id
+    // (account.ts), or "switching" while a switch swaps them. CUSTOM, never shown.
+    codeAccount: {
+        type: OptionType.CUSTOM,
+        default: ""
+    },
+    // The code fields of the slots not in use right now ("" or a local
+    // account key, account.ts). CUSTOM, never shown.
+    accountCodes: {
+        type: OptionType.CUSTOM,
+        default: {} as Record<string, unknown>
     },
     // The Subline code the reader last cleared by hand, "" for none. A
     // purchase the relay still links to this install is not saved again when
@@ -177,6 +282,13 @@ export const settings = definePluginSettings({
     deadCodeSeen: {
         type: OptionType.CUSTOM,
         default: { code: "", at: 0 } as { code: string; at: number; }
+    },
+    // The owner's off switch (surfaces/guard.tsx isFeatureOff): the features the
+    // last status answer that stated it switched off. Kept when the relay is
+    // down or says nothing. [] = everything on. CUSTOM, never shown.
+    remoteOff: {
+        type: OptionType.CUSTOM,
+        default: [] as string[]
     },
     anthropicApiKey: {
         type: OptionType.STRING,
@@ -261,8 +373,12 @@ export const settings = definePluginSettings({
         // fallback in for everyone.
         get default() { return defaultTargetLang(); },
         // targetLang is captured by value when the batcher is built, so a
-        // change here must rebuild it too.
-        onChange: notifySettingsChanged
+        // change here must rebuild it too. It also follows the Discord
+        // account (prefs.ts), like every setting below up to debugLogging.
+        onChange: () => {
+            notePrefChanged("targetLang");
+            notifySettingsChanged();
+        }
     },
     catchUpCount: {
         type: OptionType.SLIDER,
@@ -270,7 +386,8 @@ export const settings = definePluginSettings({
         description: SETTINGS_COPY.catchUpCount.description,
         markers: [0, 10, 20, 30, 50],
         default: 20,
-        stickToMarkers: true
+        stickToMarkers: true,
+        onChange: () => notePrefChanged("catchUpCount")
     },
     globalAuto: {
         type: OptionType.BOOLEAN,
@@ -280,7 +397,8 @@ export const settings = definePluginSettings({
         // globe button regardless of this setting (see channelActive).
         displayName: SETTINGS_COPY.globalAuto.title,
         description: SETTINGS_COPY.globalAuto.description,
-        default: true
+        default: true,
+        onChange: () => notePrefChanged("globalAuto")
     },
     translateSurfaces: {
         type: OptionType.BOOLEAN,
@@ -289,7 +407,19 @@ export const settings = definePluginSettings({
         // previews, and the open channel's topic, title, tags and live event.
         displayName: SETTINGS_COPY.translateSurfaces.title,
         description: SETTINGS_COPY.translateSurfaces.description,
-        default: true
+        default: true,
+        onChange: () => notePrefChanged("translateSurfaces")
+    },
+    translateNames: {
+        type: OptionType.BOOLEAN,
+        // 0.2.8, right after "Profiles, embeds and more". Any plan (hidden
+        // without one, and the plugin checks the plan itself too). Display
+        // names, nicknames, usernames and pronouns: a hover everywhere, a
+        // small line on the profile card. Never a server, channel or role name.
+        displayName: SETTINGS_COPY.translateNames.title,
+        description: SETTINGS_COPY.translateNames.description,
+        default: true,
+        onChange: () => notePrefChanged("translateNames")
     },
     debugLogging: {
         type: OptionType.BOOLEAN,
@@ -318,11 +448,14 @@ export const settings = definePluginSettings({
         hidden: () => true
     },
     sublineCode: {
-        // Shown in the plan card with a Copy button instead. A code is entered
+        // Shown in the plan card instead (selectable text). A code is entered
         // through "Enter a code", which checks it with the relay first.
         hidden: () => true
     },
     translateSurfaces: {
+        hidden: () => entitlementLevel() === "none"
+    },
+    translateNames: {
         hidden: () => entitlementLevel() === "none"
     },
     anthropicApiKey: {
