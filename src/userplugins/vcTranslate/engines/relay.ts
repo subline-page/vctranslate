@@ -3,6 +3,7 @@ import { HttpError } from "../httpError";
 import type { BatchRequest, Result } from "../types";
 import { offListFrom } from "../surfaces/features";
 import { cleanPrefEntries, type PrefEntry, type PrefKey } from "../prefShape";
+import { accessFrom, type CheckGives, checkGivesFrom, type PlanAccess } from "../planAccess";
 
 /**
  * Sent on every relay request so the relay can tell a client that knows about
@@ -28,6 +29,14 @@ export const CLIENT_ID = `vcTranslate/${PLUGIN_VERSION}`;
 export const API_HEADER = "x-subline-api";
 export const API_VERSION = "3";
 export const INSTALL_HEADER = "x-subline-install";
+/**
+ * "This client is AI only" (0.2.9). The relay answers a client as 0.2.9
+ * (✦ periods, the `access` object, no Automatic for sale) only when it sends
+ * this marker as well as a 0.2.9 version and API 3 (relay/src/access.ts
+ * isAiOnlyClient): builds that still ran Google were stamped 0.2.9 too, so
+ * the version alone must not switch a client. Sent on every relay request.
+ */
+export const AI_ONLY_HEADER = "x-subline-ai-only";
 /**
  * "This install was used before 0.2.0" (a local trial start, or an install id
  * older than the installer-seeded one). Only a hint: the relay grants the
@@ -84,7 +93,8 @@ export function relayHeaders(credential: string, install?: string, json = false,
     const h: Record<string, string> = {
         authorization: `Bearer ${credential}`,
         [CLIENT_HEADER]: CLIENT_ID,
-        [API_HEADER]: API_VERSION
+        [API_HEADER]: API_VERSION,
+        [AI_ONLY_HEADER]: "1"
     };
     if (install) h[INSTALL_HEADER] = install;
     const app = relayAppHeaderValue();
@@ -120,9 +130,12 @@ function withErrorCode<E extends Error>(err: E, body: any): E {
 /**
  * The Subline relay: keyless AI translation. The user's "key" is an opaque
  * CODE, not a provider key, and the request goes to Subline's own Worker, which
- * holds the paid Groq key and returns the SAME shape a direct provider call
- * would (see relay/). So this engine is a thin poster — the relay owns the
- * model and the prompt.
+ * holds the provider keys and returns the SAME shape a direct provider call
+ * would (see relay/). Today the Worker sends openai/gpt-oss-120b (MODEL in
+ * relay/wrangler.jsonc) through OpenRouter, routed to Groq, Cerebras or
+ * DeepInfra, and falls back to Groq's API directly (FALLBACK_MODEL, the same
+ * model). So this engine is a thin poster — the relay owns the model and the
+ * prompt.
  *
  * REPLACE this URL with your deployed Worker's URL (see relay/README.md). It is
  * a compiled constant, not a setting, for the same reason RELEASE_FEED_URL is:
@@ -211,7 +224,18 @@ export interface RelayStatus {
     /** "early": this answer first granted the early-user Automatic. */
     grant?: "early";
     /** The answer to a check-only request (x-subline-check): nothing was linked. */
-    check?: { valid: boolean; automatic: boolean; ai: boolean };
+    check?: { valid: boolean; automatic: boolean; ai: boolean; gives?: CheckGives };
+    /**
+     * 0.2.9: the plan state for the ✦ button and the plan panels
+     * (planAccess.ts). Absent from an older relay, or when malformed.
+     */
+    access?: PlanAccess;
+    /**
+     * 0.2.9, a link or move answer only: the link stands, but the relay could
+     * not read the plan, so `ai`, `previews`, `access` and the token are
+     * left out. The app keeps what it had and asks /v1/status again.
+     */
+    accessUnknown?: boolean;
     /**
      * API 3: whether this install's account is linked to a Discord account.
      * False means nothing is entitled until it is. Absent from an older relay,
@@ -366,6 +390,53 @@ export async function postFeedback(
 }
 
 /**
+ * POST /v1/event: one funnel step for the owner page (events.ts). Built from
+ * RELAY_URL like the feedback URL, so it moves with the relay. A compiled
+ * constant, like RELAY_URL.
+ */
+export const RELAY_EVENT_URL = new URL("/v1/event", RELAY_URL).href;
+
+/** The funnel steps the relay counts (relay POST /v1/event). Nothing else is ever sent. */
+export const FUNNEL_EVENTS = ["link_prompt", "link_open", "link_done", "link_cancel", "price_seen"] as const;
+export type FunnelEvent = typeof FUNNEL_EVENTS[number];
+
+export function isFunnelEvent(name: unknown): name is FunnelEvent {
+    return typeof name === "string" && (FUNNEL_EVENTS as readonly string[]).includes(name);
+}
+
+/** A funnel step is a count: it never waits long. */
+export const EVENT_TIMEOUT_MS = 5_000;
+
+/**
+ * Send one funnel step. The relay always answers 204. Resolves true on a 2xx,
+ * false on anything else. Never throws, never rejects, never retries.
+ */
+export async function postEvent(
+    credential: string,
+    install: string,
+    name: FunnelEvent,
+    fetchImpl: typeof fetch = fetch,
+    timeoutMs: number = EVENT_TIMEOUT_MS
+): Promise<boolean> {
+    if (!isFunnelEvent(name)) return false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(RELAY_EVENT_URL, {
+            method: "POST",
+            headers: relayHeaders(credential, install, true),
+            body: JSON.stringify({ e: name }),
+            signal: controller.signal
+        });
+        return res.ok;
+    } catch {
+        return false;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
  * Create a Dodo checkout session through the relay, tagged with this install
  * (see checkout.ts). A compiled constant for the same reason RELAY_URL is.
  */
@@ -512,8 +583,13 @@ function v2StatusFrom(body: any): RelayStatus {
             ? body.deadCode.trim() : undefined,
         grant: body.grant === "early" ? "early" : undefined,
         check: body.check && typeof body.check === "object" && typeof body.check.valid === "boolean"
-            ? { valid: body.check.valid, automatic: body.check.automatic === true, ai: body.check.ai === true }
+            ? {
+                valid: body.check.valid, automatic: body.check.automatic === true, ai: body.check.ai === true,
+                ...(checkGivesFrom(body.check.gives) !== undefined ? { gives: checkGivesFrom(body.check.gives) } : {})
+            }
             : undefined,
+        access: accessFrom(body.access) ?? undefined,
+        accessUnknown: body.accessUnknown === true ? true : undefined,
         linked: typeof body.linked === "boolean" ? body.linked : undefined,
         codeRefused: body.codeRefused === "code_on_other_account" || body.codeRefused === "code_in_use" ? body.codeRefused : undefined,
         codeMoved: body.codeMoved === true ? true : undefined,

@@ -1,5 +1,6 @@
 /**
- * The Activate panel, the Add AI panel and the code entry: Discord modals.
+ * The plan panel, the ended panel, the update panel and the code entry:
+ * Discord modals.
  *
  * Built on the modal Vencord itself uses (`Modal` + `openModal` from
  * @webpack/common, as in Vencord's own badges plugin at the pinned commit), so
@@ -15,12 +16,12 @@
 import { closeModal, Modal, React } from "@webpack/common";
 
 import type { Plan } from "./checkout";
+import type { UpdateText } from "./planState";
 import { PRICING_URL } from "./freePlan";
 import { openGuardedModal } from "./linkPanels";
 import { toast } from "./toast";
-import { ELSEWHERE_COPY, UPGRADE_COPY } from "./upgradeCopy";
+import { ELSEWHERE_COPY, PLAN_COPY, UPGRADE_COPY } from "./upgradeCopy";
 
-const ROW = { display: "flex", justifyContent: "space-between", padding: "8px 0", color: "var(--text-default, var(--text-normal))" };
 const MUTED = { color: "var(--text-muted)", fontSize: "0.9rem" };
 
 function openPricingInstead(): void {
@@ -59,8 +60,13 @@ function ElsewhereLink({ go }: { go?: () => void; }) {
 
 /* ------------------------------------------------------ open panels -- */
 
-/** The panels that sell something, and the payment-pending panel shown in their place. */
-export type PanelKind = "addAi" | "activate" | "pending";
+/**
+ * The windows Subline opens about the plan (0.2.9): the plan panel that
+ * sells ("plan"), the plan panel with nothing to sell ("planInfo": a
+ * subscription, a buyer, a payment on its way), the ended panel ("ended")
+ * and the update panel ("update").
+ */
+export type PanelKind = "plan" | "planInfo" | "ended" | "update";
 
 /** Modal key -> kind, for each panel opened and not yet closed by its own buttons. */
 const openPanels = new Map<string, PanelKind>();
@@ -74,9 +80,9 @@ function track(kind: PanelKind, open: (forget: () => void) => unknown): void {
 }
 
 /**
- * Close an open panel (P5: AI switched on under an open Add AI panel; P4: a
- * payment started under a buy panel). Returns whether one was open. A panel
- * the reader already closed by hand is a no-op for Discord's closeModal.
+ * Close an open panel (P5: AI switched on under an open plan panel; P4: a
+ * payment started under it). Returns whether one was open. A panel the
+ * reader already closed by hand is a no-op for Discord's closeModal.
  */
 export function closePanel(kind: PanelKind): boolean {
     let closed = false;
@@ -89,10 +95,10 @@ export function closePanel(kind: PanelKind): boolean {
     return closed;
 }
 
-/* ------------------------------------------------------------ Add AI -- */
+/* -------------------------------------------------------- plan panel -- */
 
 /** P3: the prices are on the buttons; the body is the coupon line, and "Pay on another device". */
-export function UpgradePanelBody({ elsewhere }: { elsewhere?: () => void; } = {}) {
+export function PlanPanelBody({ elsewhere }: { elsewhere?: () => void; } = {}) {
     return (
         <div>
             <div style={MUTED}>{UPGRADE_COPY.couponHint}</div>
@@ -101,88 +107,111 @@ export function UpgradePanelBody({ elsewhere }: { elsewhere?: () => void; } = {}
     );
 }
 
+/** What the plan panel can do. `subscribe` absent: nothing to sell (it shows Enter a code and OK). */
+export interface PlanPanelActions {
+    /** The plan state in words: the ✦ button's hover text (planState.ts). */
+    state: string;
+    subscribe?: (plan: Plan) => void;
+    /** Absent for a subscription or a buyer: a code would add nothing (the relay refuses it, 409). */
+    enterCode?: () => void;
+    /** "Pay on another device". */
+    elsewhere?: () => void;
+    /** A line under the state when there is nothing to sell (a payment on its way). */
+    note?: string;
+}
+
 /**
- * The Add AI panel, for an Automatic owner. `choose` runs after the panel
- * closes; `elsewhere` is "Pay on another device".
+ * THE PLAN PANEL (0.2.9 spec, decisions 11 and 15): the one window behind
+ * the ✦ button, every Subscribe and every Activate. The state, then $1.99 a
+ * month, $19.99 a year and "Enter a code"; "Enter a code" at every level.
+ * Every button closes the panel first, then runs.
  */
-export function openUpgradePanel(choose: (plan: Plan) => void, elsewhere?: () => void): void {
+export function openPlanPanel(a: PlanPanelActions): void {
+    const sells = a.subscribe !== undefined;
     try {
-        track("addAi", forget => guardedOpen((props: any) => (
-            <Modal
-                {...props}
-                title={UPGRADE_COPY.panelTitle}
-                subtitle={UPGRADE_COPY.panelSubtitle}
-                actions={[
-                    { text: UPGRADE_COPY.monthlyButton, variant: "secondary", onClick: () => { forget(); props.onClose(); choose("monthly"); } },
-                    { text: UPGRADE_COPY.annualButton, variant: "primary", onClick: () => { forget(); props.onClose(); choose("annual"); } }
-                ]}
-            >
-                <UpgradePanelBody elsewhere={elsewhere && (() => { forget(); props.onClose(); elsewhere(); })} />
-            </Modal>
-        )));
+        track(sells ? "plan" : "planInfo", forget => guardedOpen((props: any) => {
+            const then = (fn: () => void) => () => { forget(); props.onClose(); fn(); };
+            const actions: { text: string; variant: string; onClick: () => void; }[] = [];
+            if (a.enterCode !== undefined) actions.push({ text: UPGRADE_COPY.enterCodeButton, variant: "secondary", onClick: then(a.enterCode) });
+            if (a.subscribe !== undefined) {
+                const subscribe = a.subscribe;
+                actions.push(
+                    { text: UPGRADE_COPY.monthlyButton, variant: "secondary", onClick: then(() => subscribe("monthly")) },
+                    { text: UPGRADE_COPY.annualButton, variant: "primary", onClick: then(() => subscribe("annual")) }
+                );
+            } else {
+                actions.push({ text: PLAN_COPY.ok, variant: "primary", onClick: then(() => { }) });
+            }
+            return (
+                <Modal {...props} title={PLAN_COPY.panelTitle} subtitle={a.state} actions={actions}>
+                    {sells
+                        ? <PlanPanelBody elsewhere={a.elsewhere && then(a.elsewhere)} />
+                        : a.note !== undefined ? <div style={MUTED}>{a.note}</div> : null}
+                </Modal>
+            );
+        }));
     } catch {
         openPricingInstead();
     }
 }
 
+/* ------------------------------------------------------- ended panel -- */
+
 /**
- * In place of the Add AI or Activate panel while a payment is on its way (P4):
- * "Payment being confirmed", what happens next, and OK. Nothing to buy.
+ * "Your 7 days of AI translation have ended." (decision 12): once per period,
+ * at the next channel switch or the next start (index.tsx decides when).
+ * $1.99 a month, $19.99 a year, Not now. Never shown again for the period,
+ * whichever button (or the X) closes it.
  */
-export function openPaymentPendingPanel(): void {
+export function openEndedPanel(periodDays: number, subscribe: (plan: Plan) => void): boolean {
     try {
-        track("pending", forget => guardedOpen((props: any) => (
-            <Modal
-                {...props}
-                title={UPGRADE_COPY.paymentPending}
-                subtitle={UPGRADE_COPY.purchasePending}
-                actions={[
-                    { text: UPGRADE_COPY.purchasedNoticeButton, variant: "primary", onClick: () => { forget(); props.onClose(); } }
-                ]}
-            />
-        )));
+        track("ended", forget => guardedOpen((props: any) => {
+            const then = (fn: () => void) => () => { forget(); props.onClose(); fn(); };
+            return (
+                <Modal
+                    {...props}
+                    title={PLAN_COPY.endedTitle.replace("{n}", String(periodDays))}
+                    subtitle={PLAN_COPY.endedBody}
+                    actions={[
+                        { text: PLAN_COPY.notNow, variant: "secondary", onClick: then(() => { }) },
+                        { text: UPGRADE_COPY.monthlyButton, variant: "secondary", onClick: then(() => subscribe("monthly")) },
+                        { text: UPGRADE_COPY.annualButton, variant: "primary", onClick: then(() => subscribe("annual")) }
+                    ]}
+                />
+            );
+        }));
+        return true;
     } catch {
-        openPricingInstead();
+        // Nothing else opens in its place: it is a reminder, not a sale the reader asked for.
+        return false;
     }
 }
 
-/* ---------------------------------------------------------- Activate -- */
-
-export function ActivatePanelBody({ elsewhere }: { elsewhere?: () => void; } = {}) {
-    return (
-        <div>
-            <div style={ROW}>
-                <strong>{UPGRADE_COPY.automaticName}</strong>
-                <span>{UPGRADE_COPY.automaticPrice}</span>
-            </div>
-            <div style={MUTED}>{UPGRADE_COPY.automaticNote}</div>
-            <div style={{ ...MUTED, paddingTop: 8 }}>{UPGRADE_COPY.panelFootnote}</div>
-            <ElsewhereLink go={elsewhere} />
-        </div>
-    );
-}
+/* ------------------------------------------------------ update panel -- */
 
 /**
- * The Activate panel, for an install with nothing: buy Automatic, or enter a
- * code; `elsewhere` is "Pay on another device".
+ * The update panel (decision 13): once, on the first start of 0.2.9, with
+ * the text for this plan. "What's new" opens the public release notes.
  */
-export function openActivatePanel(actions: { buy: () => void; enterCode: () => void; elsewhere?: () => void; }): void {
+export function openUpdatePanel(u: UpdateText, whatsNew: () => void): boolean {
     try {
-        track("activate", forget => guardedOpen((props: any) => (
-            <Modal
-                {...props}
-                title={UPGRADE_COPY.activateTitle}
-                subtitle={UPGRADE_COPY.activateSubtitle}
-                actions={[
-                    { text: UPGRADE_COPY.enterCodeButton, variant: "secondary", onClick: () => { forget(); props.onClose(); actions.enterCode(); } },
-                    { text: UPGRADE_COPY.automaticButton, variant: "primary", onClick: () => { forget(); props.onClose(); actions.buy(); } }
-                ]}
-            >
-                <ActivatePanelBody elsewhere={actions.elsewhere && (() => { forget(); props.onClose(); actions.elsewhere!(); })} />
-            </Modal>
-        )));
+        track("update", forget => guardedOpen((props: any) => {
+            const then = (fn: () => void) => () => { forget(); props.onClose(); fn(); };
+            return (
+                <Modal
+                    {...props}
+                    title={u.title}
+                    subtitle={u.text}
+                    actions={[
+                        ...(u.whatsNew ? [{ text: PLAN_COPY.whatsNew, variant: "secondary", onClick: then(whatsNew) }] : []),
+                        { text: PLAN_COPY.ok, variant: "primary", onClick: then(() => { }) }
+                    ]}
+                />
+            );
+        }));
+        return true;
     } catch {
-        openPricingInstead();
+        return false;
     }
 }
 

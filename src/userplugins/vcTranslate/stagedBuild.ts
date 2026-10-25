@@ -56,6 +56,24 @@ export function parseStagedBuildId(jsonText: string): string | null {
     return isBuildId(id) ? id : null;
 }
 
+/**
+ * A release version as the release page names it: three plain numbers. The
+ * plugin builds a link from it (updateNotice.ts), so nothing else gets through.
+ */
+const VERSION_PATTERN = /^\d{1,6}\.\d{1,6}\.\d{1,6}$/;
+
+/**
+ * Pull the staged bundle's version (`pluginVersion`) out of a mod-manifest JSON
+ * string, or null. Total like parseStagedBuildId, and only from a manifest
+ * whose buildId is valid too: the version belongs to the build the restart
+ * notice is about.
+ */
+export function parseStagedVersion(jsonText: string): string | null {
+    if (parseStagedBuildId(jsonText) === null) return null;
+    const version = (JSON.parse(jsonText) as { pluginVersion?: unknown }).pluginVersion;
+    return typeof version === "string" && VERSION_PATTERN.test(version) ? version : null;
+}
+
 export interface StagedBuildOptions {
     platform?: NodeJS.Platform;
     env?: NodeJS.ProcessEnv;
@@ -77,6 +95,20 @@ export function readStagedBuildIdSync(options: StagedBuildOptions = {}): string 
         return parseStagedBuildId(readFileSync(path, "utf8"));
     } catch {
         // Missing file / permission / anything else: nothing new to report.
+        return null;
+    }
+}
+
+/**
+ * Read the staged bundle's version, or null when it cannot be read. Same
+ * contract as readStagedBuildIdSync: never throws.
+ */
+export function readStagedVersionSync(options: StagedBuildOptions = {}): string | null {
+    const path = options.path ?? manifestPath(options);
+    if (path === null) return null;
+    try {
+        return parseStagedVersion(readFileSync(path, "utf8"));
+    } catch {
         return null;
     }
 }

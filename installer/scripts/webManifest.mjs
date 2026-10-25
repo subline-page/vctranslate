@@ -11,8 +11,8 @@
  *  - only the stylesheet is web-accessible (Vencord fetches it from the page).
  *
  * And with what the plugin needs added: the background, with host permissions
- * for the relay and Google's translate host only (router.ts ALLOWED_ORIGINS),
- * so neither has to open CORS, and the page-world transport loaded before
+ * for the relay only (router.ts ALLOWED_ORIGINS; 0.2.9 is AI only, so no
+ * Google host), so it need not open CORS, and the page-world transport loaded before
  * Vencord. Discord's own host stays: Chromium's rule that removes Discord's
  * Content-Security-Policy (rules.json) needs host access to discord.com, and
  * Firefox's webRequest needs the same.
@@ -25,7 +25,7 @@
  * decision 1; linking spec decision 11).
  * Set by hand with the release, like package.json's version.
  */
-export const ADDON_VERSION = "0.2.8";
+export const ADDON_VERSION = "0.2.9";
 
 export const ADDON_NAME = "Subline";
 export const ADDON_DESCRIPTION = "Translate Discord messages into your language, right in the chat.";
@@ -33,7 +33,7 @@ export const ADDON_HOMEPAGE = "https://subline.page";
 export const FIREFOX_ADDON_ID = "addon@subline.page";
 
 export const DISCORD_MATCH = "https://*.discord.com/*";
-export const NETWORK_HOSTS = ["https://relay.subline.page/*", "https://translate-pa.googleapis.com/*"];
+export const NETWORK_HOSTS = ["https://relay.subline.page/*"];
 
 export const ICONS = { 16: "icons/icon-16.png", 32: "icons/icon-32.png", 48: "icons/icon-48.png", 128: "icons/icon-128.png" };
 
@@ -105,8 +105,8 @@ export function firefoxManifest(version = ADDON_VERSION) {
                 strict_min_version: "128.0",
                 // Firefox Add-ons asks every new add-on to declare what leaves
                 // the device (extensionworkshop.com, firefox-builtin-data-consent):
-                //  - websiteContent: message text goes to the translators
-                //    (Google, the relay);
+                //  - websiteContent: message text goes to the translator
+                //    (the relay);
                 //  - authenticationInfo: linking sends Discord's sign-in code
                 //    to the relay, which ties the plan to the Discord account;
                 //  - personallyIdentifyingInfo: the feedback box can send an

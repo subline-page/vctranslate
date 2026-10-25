@@ -18,7 +18,7 @@
  * NO FIXED TIME LIMIT. While the background works on a call, the content
  * script says so every 15 s ("subline:page-busy"). A call gives up only after
  * IDLE_MS with no word at all (the content script is gone). The desktop has no
- * limit either: a long catch-up queued behind Google's shared gate is
+ * limit either: a long catch-up queued behind the relay's rate gate is
  * delivered, not dropped while its work runs on.
  *
  * UPDATED UNDER THE PAGE. When the content script reports that it lost the

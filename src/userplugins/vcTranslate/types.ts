@@ -1,4 +1,11 @@
-export type EngineId = "google" | "claude" | "gemini" | "groq" | "relay";
+/**
+ * 0.2.9 is AI only: "relay" (✦, Subline's own relay) is the one engine any
+ * build uses. Google and the short-message judge are gone (spec decision 1).
+ * The bring-your-own-key engines stay in the type only so that a line an
+ * older build stored under one still reads as ✦; nothing sends to them
+ * (native.ts refuses them, and the engine setting is always "relay").
+ */
+export type EngineId = "claude" | "gemini" | "groq" | "relay";
 
 /**
  * The Gemini model the quality tier asks for unless the user overrides it in
@@ -95,11 +102,7 @@ export interface PendingMessage {
     author: string;
     text: string;
     channelId: string;
-    /**
-     * The message this one replies to, when Discord says it is a reply.
-     * Carried so the Google path can borrow the parent's already-detected
-     * language for texts too short to detect on their own — see `sourceLang`.
-     */
+    /** The message this one replies to, when Discord says it is a reply. */
     replyToId?: string;
     /**
      * A short clipped copy of the parent (see REPLY_PARENT_MAX in index.tsx),
@@ -111,44 +114,21 @@ export interface PendingMessage {
 }
 
 export interface BatchRequest {
-    /**
-     * True when Google is the reader's ONLY translator (no LLM configured).
-     * google.ts then retries a throttled request up to three times with
-     * growing delays instead of once: with nothing arriving behind the fast
-     * tier, patience buys translations. With an LLM configured it stays ONE
-     * quick retry, because every second spent retrying Google is a second the
-     * reactive quality flush is not being fired.
-     */
-    patientRetries?: boolean;
-    /**
-     * Google only: at most this many of the batch's texts in flight at once.
-     * Surface translations (profiles, embeds and more) send 1, so background
-     * text never bursts the free endpoint messages depend on.
-     */
-    maxConcurrency?: number;
     messages: {
         id: string;
         author: string;
         text: string;
         replyToId?: string;
-        /** The parent's clipped copy; see PendingMessage.replyTo. Google ignores it. */
+        /** The parent's clipped copy; see PendingMessage.replyTo. */
         replyTo?: { author: string; text: string };
-        /**
-         * Pins Google's `sl` instead of letting it auto-detect. Set only for
-         * short texts whose reply-parent was itself detected confidently. The
-         * LLM engines ignore it: conversation context already tells them more
-         * than one language code could.
-         */
-        sourceLang?: string;
     }[];
     context: { author: string; text: string }[];
     targetLang: string;
     /**
-     * Relay only. "preview" asks for a ✦ preview for an Automatic owner (five
-     * a day), which the relay cuts to its first few words (the client cuts
-     * again, for an older relay). "auto" was the 0.1.x free trial's automatic
-     * batch; 0.2.0 has no trial and never sends it, and the type keeps it only
-     * for the older relay contract. Absent everywhere else.
+     * Relay only. "preview" asks for one of the day's five ✦ (⚡) for an
+     * install whose ✦ is off. "auto" was the 0.1.x free trial's automatic
+     * batch; nothing sends it now, and the type keeps it only for the older
+     * relay contract. Absent everywhere else.
      */
     mode?: "auto" | "preview";
     /**
@@ -161,78 +141,19 @@ export interface BatchRequest {
     force?: true;
 }
 
-/**
- * Below this, Google's own detection confidence is not worth acting on.
- *
- * Measured against the live endpoint, not guessed. Every misdetection observed
- * in real chat sat under it and every correct one sat well above:
- *
- *   "ne"   -> ha 0.217  "it is"       (German: "no"  — the OPPOSITE)
- *   "klar" -> da 0.378  "clear"
- *   "ja"   -> et 0.446  "and"         (German: "yes")
- *   "nö"   -> et 0.609  "so-called"   (German: "nope")
- *   "ok"                -> en 0.912   correct
- *   "ok dann brauch..." -> de 0.987   correct
- *   "sind die gruppen..." / "hola que tal" -> 1.0  correct
- *
- * Short conversational replies are both the hardest to detect and the ones
- * where being wrong inverts the meaning, so they matter more than their length
- * suggests.
- */
-export const MIN_DETECT_CONFIDENCE = 0.85;
-
-/**
- * Below this, a Google translation is not SHOWN AT ALL.
- *
- * MIN_DETECT_CONFIDENCE (above) decides whether to trust a detected language
- * for borrowing/pinning; this decides whether the translation Google built on
- * top of a low-confidence detection is worth putting under the message. They
- * share the 0.85 line because the same table drives both — every misdetection
- * observed in real chat sat under it and inverted the meaning ("ne" -> Hausa
- * "it is" at 0.217, the OPPOSITE of the German "no").
- *
- * The bias is deliberately toward SILENCE: a missing translation is invisible
- * and self-corrects on the quality tier's pass, while a wrong one sits under
- * the message asserting a meaning the speaker never had. When Google reports a
- * confidence below this, google.ts suppresses the line (skip) rather than
- * showing a guess. A response with NO confidence at all is not gated here —
- * there is nothing to be unsure of, so it still translates.
- */
-export const GOOGLE_MIN_CONFIDENCE = 0.85;
-
-/**
- * Texts at or below this length are the ones auto-detection gets wrong (see
- * the table above — every failure was 4 characters or fewer). Only these
- * borrow a reply-parent's language, which bounds the blast radius of the
- * borrow being wrong: a long message in a genuinely different language still
- * gets detected on its own merits.
- */
-export const SHORT_TEXT_MAX = 12;
-
 // `failed` is the per-message failure variant: it lets a batch return a real
 // answer for the messages that worked and an explicit marker for the ones that
 // did not, instead of the whole batch being all-or-nothing (or, worse, a
 // message silently vanishing from the results with no marker at all — the
 // renderer would then show nothing forever and re-request it on every open).
 // It mirrors `StoredTranslation`'s `{ failed: true }` shape in store.ts.
-export type SkipReason = "target" | "same" | "unsure";
-
 export type Result =
-    // `conf` is Google's own detection confidence, passed through so the
-    // renderer can mark a translation it should not be trusted. Absent for the
-    // LLM engines (they report no such number) and absent when `sourceLang`
-    // pinned the language, because then nothing was detected to be unsure of.
-    //
     // `truncated` is set only by the relay's preview mode: the text is the
     // first few words of the ✦ translation, not all of it, and must never be
     // stored or shown as a full translation.
-    | { id: string; lang: string; text: string; skip: false; conf?: number; truncated?: boolean }
-    // `reason` is set by Google only. "target": it detected the reader's own
-    // language; "same": it handed the text back unchanged; "unsure": its
-    // detection was below the confidence gate. Only "unsure" is not a verdict
-    // about the text: nothing may be cached or cancelled on it. The LLM
-    // engines never set a reason; their skip is a decision.
-    | { id: string; skip: true; reason?: SkipReason }
+    | { id: string; lang: string; text: string; skip: false; truncated?: boolean }
+    // The engine decided this text needs no translation.
+    | { id: string; skip: true }
     // `transport` marks a failure that never REACHED a verdict: a 429 that
     // survived the retry, a 5xx, a network drop, for THIS message while its
     // batch-mates went through. It is a fact about the moment, not the
@@ -244,17 +165,14 @@ export type Result =
  * What each engine can do, and — via `hasOwnProperty` in store.ts's
  * isKnownEngine — the single runtime list of which engine ids exist at all.
  *
- * `supportsContext` is READ, by rebuildBatcher() in index.tsx, for both tiers.
- * That matters: a capability table nothing consults is a comment pretending to
- * be code, and the two tiers hardcoding their own values is exactly how this
- * table would come to disagree with the batchers it describes.
+ * `supportsContext` is READ, by rebuildBatcher() in index.tsx. That matters:
+ * a capability table nothing consults is a comment pretending to be code.
  */
 export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
     // Subline relay: LLM-backed, so it wants conversation context like the
     // keyed engines. Its key is a code and its endpoint is the relay, but from
     // the batcher's point of view it is a context-aware quality engine.
     relay: { supportsContext: true },
-    google: { supportsContext: false },
     claude: { supportsContext: true },
     gemini: { supportsContext: true },
     groq: { supportsContext: true }
@@ -263,9 +181,8 @@ export const ENGINE_CAPS: Record<EngineId, { supportsContext: boolean }> = {
 /**
  * True when a translation is indistinguishable from its source, so there is
  * nothing worth rendering. Engines pass text through unchanged when they
- * misdetect the language — Google reads "hbu" as Frisian and "u2 <2" as
- * Chinese — and the detected-language check cannot catch that, because the
- * bogus detection is not the target language either.
+ * misdetect the language, and the detected-language check cannot catch
+ * that, because the bogus detection is not the target language either.
  *
  * Compares case-insensitively with whitespace collapsed, so a translation
  * differing only in spacing or capitalisation still counts as no translation.
@@ -276,64 +193,17 @@ export function isSameText(a: string, b: string): boolean {
 }
 
 /**
- * The fast tier: Google, with NO debounce window. This is what the reader
- * actually sees first, so every millisecond here is stare time.
+ * The ✦ tier's grouping window (0.2.9, spec decision 7): a live message waits
+ * at most this long, so a burst of quick lines leaves as one request of up to
+ * QUALITY_MAX_BATCH messages.
  *
- * WHY ZERO. The old 700ms window existed "to make fewer tiny HTTP calls" —
- * a premise that was never true: engines/google.ts sends ONE request PER
- * MESSAGE whatever the batch size (its own concurrency cap does the rate
- * shaping), so holding messages back reduced what Google receives by exactly
- * nothing. The window bought no requests and cost 700ms on every ≈ line —
- * more than half the observed end-to-end latency.
- *
- * What the window WAS doing usefully — coalescing catch-up's backlog into one
- * flush — a zero timer still does: catch-up enqueues synchronously in a loop
- * and setTimeout(0) fires after it, so the whole backlog lands in one batch
- * (pinned by "coalesces a synchronous burst" in index.test.ts). Messages
- * arriving over the network seconds apart flush separately, which is the same
- * number of Google requests either way.
- *
- * Also the quality tier's window while Google is cooling down (see
- * rebuildBatcher): in that state the LLM is the reader's only translator and
- * the same argument applies — the rate gate, not a window, is what protects
- * the quota.
+ * 3s (was 1.5s while Google put a ≈ line on screen first). With ✦ the only
+ * engine the reader waits for this window, so it stays short; it is a fixed
+ * window from the FIRST message, so a busy channel flushes at most every 3s,
+ * sooner at the 25-message cap. Catch-up bypasses it entirely (flushNow)
+ * because a backlog is already complete when it is queued. The request
+ * ceiling itself is the relay's (per-code rate limit, the hidden daily
+ * ceiling) and the client's rate gate, not this window.
  */
-export const FAST_DEBOUNCE_MS = 0;
-
-/**
- * How long Google is parked after refusing a WHOLE batch.
- *
- * NOT DEFAULT_COOLDOWN_MS (60s). That number is for API-quota 429s, where
- * retrying into the wall costs budget and cannot succeed until the window
- * turns. translate_a is not a quota: it sheds individual requests while the
- * next one sails through (measured 2026-09-02: nine 200s around one 429, and
- * again 2026-09-03 at roughly one success in seven). With single-message
- * batches, every lost message was a "whole batch" failure, so ONE dropped
- * request parked the engine for a full minute during which every new message
- * deferred untried. On a throttled network that turned "waiting" into a
- * many-minutes cycle - measured by the product owner, twice, in growing
- * anger. Ten seconds keeps a brake on the treadmill (at most ~6 probes a
- * minute) without turning one shed request into a minute of blindness.
- */
-export const GOOGLE_COOLDOWN_MS = 10_000;
-export const FAST_MAX_BATCH = 10;
-
-/**
- * The quality tier: the configured LLM, on a short grouping window.
- *
- * 1.5s (was 20s until 2026-09-20). The long window was sized against a
- * personal Gemini free-tier key's 20 requests per rolling minute, and it meant
- * every ✦ line trailed its ≈ line by twenty seconds, and a channel open by
- * more than a minute once a second batch queued behind the gate. With the
- * relay, the request ceiling is enforced server-side (per-code rate limit and
- * daily message cap) and by the client's rate gate; this window only has to
- * do what a window is for: group a burst of quick live lines into one batch.
- * A fixed window from the first message, so a busy channel flushes at most
- * every 1.5s, sooner at the 25-message batch cap. Catch-up bypasses it
- * entirely (flushNow) because a backlog is already complete when it is queued.
- *
- * The reader does not wait on this: the fast tier has already put a subtitle
- * on screen. This window only decides how long the line stays Google's.
- */
-export const QUALITY_DEBOUNCE_MS = 1_500;
+export const QUALITY_DEBOUNCE_MS = 3_000;
 export const QUALITY_MAX_BATCH = 25;

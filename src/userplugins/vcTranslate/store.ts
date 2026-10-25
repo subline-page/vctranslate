@@ -11,44 +11,30 @@ const logger = new Logger("VcTranslate");
 // entire already-target-language backlog on every channel open, forever. In a
 // mixed-language chat that is most of the backlog.
 //
-// `deferred` is HISTORICAL — nothing writes it any more. It existed for the
-// same "don't leave it blank" reason but for the opposite situation: the
-// request was never attempted at all, or was rejected by the API before it
-// ever reached the model (most commonly a 429 from a catch-up burst against
-// Claude/Gemini's free/low tiers), which is not a translation failure and must
-// not render as one. That marker made sense while an LLM was the reader's only
-// translator; with a fast tier there is always a Google line in place instead,
-// so a rate-limited quality tier now writes nothing at all (see index.tsx's
-// runTier, and the `deferred` branch in TranslationAccessory). The variant
-// stays because entries persisted by an earlier version are still read back on
-// launch and must keep rendering sensibly. `failed` is reserved for a genuine
-// attempt that came back broken (bad response shape, an id the model never
-// returned a usable row for, a non-retryable transport error).
+// `deferred` (0.2.9: written again) means "no answer yet, asking again": the
+// ✦ request never reached a verdict (no answer, a 5xx, a rate limit, the
+// relay cooling down). With ✦ the only engine, a message must never sit
+// blank with no sign while that happens, so the message wears this quiet
+// marker and is retried (index.tsx runTier, armDeferredRetry). `failed` is
+// reserved for a genuine attempt that came back broken twice (the model
+// returned no usable row for the id).
 //
 // All four are "resolved" in the sense that catch-up's cache-hit check must
-// see an entry at all; `failed` and `deferred` are the two worth retrying.
+// see an entry at all; `failed` and `deferred` are the two worth retrying,
+// and neither is ever persisted (setTranslation).
 //
 // `via` records which engine actually produced a real translation. It lives in
-// the VALUE, not in the key (see makeKey), and it is what lets the accessory
-// tell the reader whether the line they are reading came from a
-// context-aware model or from Google's per-message approximation.
-//
-// `conf` is Google's detection confidence, kept for two jobs: the accessory
-// marks a low-confidence line so the reader knows not to trust it, and a short
-// reply borrowing this message's language only does so when this message was
-// itself detected confidently — otherwise one bad detection would propagate
-// down an entire reply chain.
+// the VALUE, not in the key (see makeKey). 0.2.9 writes only "relay"; a line
+// an older build stored under Google or the short-message judge is dropped
+// when it is read back (loadPersistedTranslations), so no ≈ line ever shows.
 export type StoredTranslation =
     // `same`: a ⚡ (forced) answer that is the source text itself, i.e. the
     // message is already in the reader's language. Shown as one short line
     // instead of a duplicate of the message.
-    | { lang: string; text: string; via: EngineId; conf?: number; same?: true }
+    | { lang: string; text: string; via: EngineId; same?: true }
     | { failed: true }
-    // `via` matters here: Google reports "already in the target language" for
-    // short messages it simply failed to identify — it returns "ne" unchanged,
-    // which isSameText reads as a skip. Treating THAT as final would deny the
-    // quality tier the exact messages it is best at. Only an LLM's skip is
-    // authoritative enough to close a message for good.
+    // `via`: which engine decided. A skip with no `via` is one an older build
+    // wrote for Google; it is dropped on load, never trusted.
     | { skipped: true; via?: EngineId }
     | { deferred: true };
 
@@ -116,14 +102,12 @@ function isStoredTranslation(value: unknown): value is StoredTranslation {
         return Object.keys(o).length === 1;
     }
 
-    // `skipped` carries one key on its own, or two when it also records which
-    // engine's skip closed the message — see the `via` comment on
-    // StoredTranslation. A stray extra key, or a `via` that fails the same
-    // isKnownEngine check a real translation's `via` does, is malformed and
-    // dropped rather than trusted.
+    // `skipped` carries two keys: it records which engine's skip closed the
+    // message. One on its own was Google's (older builds wrote it unmarked),
+    // and a stray extra key, or a `via` that fails the same isKnownEngine
+    // check a real translation's `via` does, is malformed: all dropped.
     if (o.skipped === true) {
         const keys = Object.keys(o);
-        if (keys.length === 1) return true;
         return keys.length === 2 && "via" in o && isKnownEngine(o.via);
     }
 
@@ -135,10 +119,11 @@ function isStoredTranslation(value: unknown): value is StoredTranslation {
 /**
  * `via` is validated against ENGINE_CAPS — the runtime table that already has
  * to list every engine — rather than against a hand-written string literal
- * union that would drift. A persisted entry outlives a rename of the engine
- * ids, so a stored `via: "gemini"` after a rename to (say) "google-gemini"
- * would otherwise be trusted and then crash ENGINE_PROVENANCE[entry.via] in
- * the renderer with an undefined lookup. Dropping the entry costs one
+ * union that would drift. A persisted entry outlives a rename or removal of
+ * an engine id: 0.2.9 removed "google" and "judge", so a stored ≈ line (or
+ * judge line) is not a known engine any more and is dropped on load, never
+ * shown. Trusting it would also crash ENGINE_PROVENANCE[entry.via] in the
+ * renderer with an undefined lookup. Dropping the entry costs one
  * re-translation; trusting it breaks the subtitle.
  */
 function isKnownEngine(value: unknown): value is EngineId {
@@ -243,16 +228,12 @@ function trim(map: Map<string, StoredTranslation>, max: number): void {
  * target language, engine).
  *
  * Keying by engine meant a translation produced by one engine was invisible to
- * a reader configured for another: the writer wrote `<id> <lang> google` while
- * the accessory looked up `<id> <lang> gemini` and got a guaranteed miss. That
- * makes an engine fallback — translate with Google when the LLM engine is
- * unavailable — structurally impossible to display, which is the reason this
- * component exists in the shape it does.
+ * a reader configured for another: the writer wrote one engine's key while
+ * the accessory looked up another's and got a guaranteed miss.
  *
  * The visible consequence, which is intended: switching engines does not
- * re-request anything. A message already translated by Google stays on screen,
- * labelled as Google, when Gemini is selected. Budget is not re-spent
- * upgrading messages the user has already read.
+ * re-request anything. Budget is not re-spent upgrading messages the user has
+ * already read.
  *
  * Separator discipline: exactly one space, and no trailing separator, so
  * `invalidateMessage`'s `"<id> "` prefix scan matches message `7` without also
@@ -278,7 +259,7 @@ export function setTranslation(key: string, value: StoredTranslation): void {
 
     // Markers stay in this session. A failed or deferred entry is a fact
     // about a MOMENT — the throttled minute, the parked engine — not about
-    // the message, and persisting one turns "Google was busy on Tuesday"
+    // the message, and persisting one turns "the relay was busy on Tuesday"
     // into a warning shown every session until something happens to heal it.
     // Removing any older persisted value for the key matters as much as not
     // adding one: a marker must also STOP a stale disk entry from
@@ -294,6 +275,21 @@ export function setTranslation(key: string, value: StoredTranslation): void {
     }
 
     for (const fn of listeners) fn();
+}
+
+/**
+ * Take a ⏳ (deferred) marker away, and only that: the message then has no
+ * entry, so it shows nothing and is asked again like one never asked. For a
+ * wait that will not end in a request soon (a hold, ✦ turned off), where
+ * "translating…" would not be true. Markers are never on disk, so memory is
+ * all there is. True when one was removed.
+ */
+export function dropDeferred(key: string): boolean {
+    const e = cache.get(key);
+    if (e === undefined || !("deferred" in e)) return false;
+    cache.delete(key);
+    for (const fn of listeners) fn();
+    return true;
 }
 
 export function invalidateMessage(messageId: string): void {

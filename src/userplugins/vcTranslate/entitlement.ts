@@ -1,19 +1,28 @@
 import * as DataStore from "@api/DataStore";
 
+import { accessFrom, type PlanAccess } from "./planAccess";
+
 /**
  * WHAT THIS INSTALL HAS PAID FOR, as the relay last said it (v2 /v1/status).
  *
- * There is no free tier. An install is one of three things:
- *  - "none": nothing is translated; the activation notice is shown;
- *  - "automatic": ≈ Google on every message and surface, decoders, and five
- *    ✦ previews a day from ⚡ in the hover toolbar;
- *  - "ai": the above plus ✦ on everything (relay, under the saved code).
+ * An install is one of three levels (0.2.9, AI only: there is no Google ≈
+ * line any more):
+ *  - "none": nothing is translated by itself; the activation notice is shown;
+ *  - "automatic": ✦ is off; ⚡ in the hover toolbar gives five ✦
+ *    translations a day (see the 0.2.9 paragraph below for who is here);
+ *  - "ai": ✦ on every message and surface, through the relay.
  *
  * The relay is the authority and states `tokenExpiresAt` (7 days out) on every
  * good answer. The answer is kept on disk, so Automatic keeps working offline
  * until that moment and no longer; after it, the install counts as "none"
  * until the relay answers again. The plugin asks at start and every 24 hours,
  * so an online install never gets near the edge.
+ *
+ * 0.2.9 (AI only, no Google): "automatic" no longer translates anything by
+ * itself. It is "✦ is off, ⚡ gives the day's five" (a period that ended, a
+ * Discord account too young for the 7 days, an early user's Automatic), and
+ * "ai" is "✦ is on" (a running or not yet started period, a subscription, a
+ * buyer). The relay's `access` object (planAccess.ts) says which.
  *
  * Free of Discord and settings, so the rules can be read and tested alone.
  */
@@ -58,6 +67,11 @@ export interface Entitlement {
      * link asks the account confirm first. Absent otherwise.
      */
     pendingPurchase?: boolean;
+    /**
+     * 0.2.9: the plan state the relay stated (planAccess.ts), its times moved
+     * onto the local clock. Absent from an older relay.
+     */
+    access?: PlanAccess;
 }
 
 /**
@@ -126,6 +140,8 @@ export function parseEntitlement(raw: unknown): Entitlement | null {
     if (typeof o.linked === "boolean") out.linked = o.linked;
     if (o.mustLink === true) out.mustLink = true;
     if (o.pendingPurchase === true) out.pendingPurchase = true;
+    const access = accessFrom(o.access);
+    if (access !== null) out.access = access;
     return out;
 }
 
@@ -180,6 +196,14 @@ export function entitlementLevel(now: number = Date.now()): Level {
     if (e.holder !== undefined && currentHolder !== null && e.holder !== currentHolder) return "none";
     const aiLive = e.ai && (e.aiUntil === undefined || now < e.aiUntil);
     if (aiLive) return "ai";
+    // 0.2.9: ✦ is off. ⚡ gives the day's five when the relay stated them, or
+    // when ✦ just ran out by the clock (a period that ended while Discord
+    // runs: the relay gives the five then, and is asked at once). Not linked:
+    // nothing, the Link comes first.
+    if (e.access !== undefined) {
+        if (e.access.linkNeeded === true) return "none";
+        if (e.access.boosts.cap > 0 || e.ai) return "automatic";
+    }
     return e.automatic ? "automatic" : "none";
 }
 

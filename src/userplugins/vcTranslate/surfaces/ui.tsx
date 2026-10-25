@@ -10,14 +10,11 @@
  * the original one hover away in the tooltip. It inherits Discord's own
  * styling, so it truncates the same way and no row changes height.
  *
- * TIGHT PLACES ARE ✦ ONLY. They never ask Google, so a long list costs no ≈
- * fan-out. Until ✦ has the text, or when it is skipped (already the reader's
- * language) or failed, Discord's original shows, untouched.
- *
- * LINES: ≈ FIRST, THEN ✦, as under messages. A ≈ line Google itself was unsure of
- * (the same confidence and romanization rules the message subtitle uses) is
- * not shown at all: a paid reader waits the moment for ✦ instead of reading
- * "≈ rough".
+ * ✦ ONLY (0.2.9, AI only). Until ✦ has the text, or when it is skipped
+ * (already the reader's language) or failed, Discord's original shows,
+ * untouched, in a line or in place. A ✦ answer that says nothing new (the text
+ * handed back as written, or nothing left once cleaned) means no translation
+ * is needed: nothing shows (owner 2026-10-19).
  *
  * EVERY COMPONENT FAILS SAFE. Each one is wrapped so a throw renders nothing
  * (see `safe`), and each one renders nothing when there is no service (the
@@ -29,10 +26,9 @@ import { DECODED_TITLE, decodedPrefix, decodeMessage } from "../decode";
 import { IN_PLACE_COPY } from "../upgradeCopy";
 import { React } from "@webpack/common";
 
-import { isRomanizedGuess } from "../romanized";
-import { MIN_DETECT_CONFIDENCE } from "../types";
 import { normalizeSurfaceText, type SurfaceEntry } from "./cache";
 import type { SurfaceText } from "./extract";
+import { sayNothingNew } from "./names";
 import { fitLongText, type SurfaceService } from "./service";
 
 let service: SurfaceService | null = null;
@@ -47,35 +43,31 @@ export function currentSurfaceService(): SurfaceService | null {
 }
 
 export interface SurfaceDisplay {
-    glyph: "≈" | "✦";
+    glyph: "✦";
     lang: string;
     text: string;
 }
 
 /**
- * Google's ≈ for `source` is a guess not worth showing: detected below the
- * confidence gate, or romanized text (Arabizi, Hinglish, Darija in Latin
- * letters), which Google translates confidently and wrongly, sometimes with
- * the negation inverted. ONE rule for every surface, roomy or in place.
+ * ✦'s answer for `source`, cleaned, or null when it says nothing new: no
+ * translation needed. Then the text shows nothing at all.
  */
-export function fastUnsure(fast: { lang: string; conf?: number; }, source: string): boolean {
-    return (fast.conf !== undefined && fast.conf < MIN_DETECT_CONFIDENCE) || isRomanizedGuess(fast.lang, source);
-}
-
-/** What to show for an entry, or null. The ≈ line is held back when it is unsure. */
-export function displayFor(entry: SurfaceEntry | null | undefined, source: string): SurfaceDisplay | null {
-    if (!entry) return null;
+function qualityText(quality: { text: string; }, source: string): string | null {
     // Custom emoji junk (ids, :NAME:) never shows, whatever was cached.
-    if (entry.quality) return shownOrNull({ glyph: "✦", lang: entry.quality.lang, text: cleanTranslation(entry.quality.text.trim(), source) });
-    const fast = entry.fast;
-    if (!fast) return null;
-    if (fastUnsure(fast, source)) return null;
-    return shownOrNull({ glyph: "≈", lang: fast.lang, text: cleanTranslation(fast.text.trim(), source) });
+    const text = cleanTranslation(quality.text.trim(), source);
+    if (text.trim() === "") return null;
+    // `sayNothingNew` counts letters only. An answer of digits and no letters
+    // ("三十" read as "30") still says something new when the source has
+    // letters; one with neither letters nor digits says nothing.
+    if (!/\p{L}/u.test(text.normalize("NFKC"))) return /\p{N}/u.test(text) && /\p{L}/u.test(source.normalize("NFKC")) ? text : null;
+    return sayNothingNew(text, source) ? null : text;
 }
 
-/** A line that is empty once cleaned is not shown at all. */
-function shownOrNull(d: SurfaceDisplay): SurfaceDisplay | null {
-    return d.text.trim() === "" ? null : d;
+/** What to show for an entry: its ✦ answer, or null. */
+export function displayFor(entry: SurfaceEntry | null | undefined, source: string): SurfaceDisplay | null {
+    if (!entry?.quality) return null;
+    const text = qualityText(entry.quality, source);
+    return text === null ? null : { glyph: "✦", lang: entry.quality.lang, text };
 }
 
 let rtlTarget: () => boolean = () => false;
@@ -127,11 +119,15 @@ export const PARTIAL_NOTE = "Translated the first part. The rest is too long.";
 
 /**
  * Roomy: one small line per foreign text, under the original. The line is
- * just the glyph and the translation ("✦ translation" or "≈ translation"):
+ * just the glyph and the translation ("✦ translation"):
  * no kind word ("Status", "About me", ...) and no language code. Where it sits
  * already says what it translates.
+ *
+ * `withOriginal`: the line starts with its original ("original ✦ translation"),
+ * for texts whose original is not on screen next to the line (the options of
+ * a drop-down server question, hidden until it is opened).
  */
-export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
+export function SurfaceLines({ texts, withOriginal = false }: { texts: SurfaceText[]; withOriginal?: boolean; }) {
     useSurfaceUpdates();
     try {
         if (service === null || !Array.isArray(texts) || texts.length === 0) return null;
@@ -146,6 +142,7 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
             const partial = long && fitLongText(normalizeSurfaceText(t.text)).partial;
             lines.push(
                 <div key={`${t.kind}:${t.text}`} style={LINE_STYLE} data-subline-surface={t.kind}>
+                    {withOriginal && <span dir="auto">{t.text} </span>}
                     <span>{shown.glyph} </span>
                     <span dir={translationDir()}>{shown.text}</span>
                     {partial && <span data-subline-partial="">{" · "}{PARTIAL_NOTE}</span>}
@@ -158,33 +155,18 @@ export function SurfaceLines({ texts }: { texts: SurfaceText[]; }) {
     }
 }
 
-/**
- * The translation of a tight text, or null while pending, skipped or failed.
- * ✦ when there is one. Without ✦ (an Automatic owner, or an AI reader whose
- * surface ✦ for today is spent) Google's ≈ is shown in place instead, held
- * back by the same unsure rules as a roomy line.
- */
-export function tightTranslation(text: string): { lang: string; text: string; glyph: "✦" | "≈"; } | null {
+/** The ✦ translation of a tight text, or null while pending, skipped or failed. */
+export function tightTranslation(text: string): { lang: string; text: string; glyph: "✦"; } | null {
     if (service === null) return null;
-    const entry = service.want(text, { tight: true });
-    const q = entry?.quality;
-    const qText = q ? cleanTranslation(q.text.trim(), text) : "";
-    if (q && qText.trim() !== "") return { lang: q.lang, text: qText, glyph: "✦" };
-    // While ✦ is the only source, nothing until it lands, EXCEPT a ≈ already
-    // cached: it was fetched while ✦ was down (P9), and blanking it the moment
-    // ✦ is back would take a readable line away until ✦ answers.
-    const f = entry?.fast;
-    if (service.tightQualityOnly() && !f) return null;
-    if (!f || f.text.trim() === "") return null;
-    if (fastUnsure(f, text)) return null;
-    const fText = cleanTranslation(f.text.trim(), text);
-    if (fText.trim() === "") return null;
-    return { lang: f.lang, text: fText, glyph: "≈" };
+    const q = service.want(text, { tight: true })?.quality;
+    if (!q) return null;
+    const qText = qualityText(q, text);
+    return qText === null ? null : { lang: q.lang, text: qText, glyph: "✦" };
 }
 
 const PREFIX_STYLE = { opacity: 0.75 } as const;
 
-/** "✦ translation" (or "≈ translation"), with the original text as its tooltip. */
+/** "✦ translation", with the original text as its tooltip. */
 export function TranslatedInPlace({ original, translation, glyph = "✦" }: { original: string; translation: unknown; glyph?: string; }) {
     return (
         <span title={original} data-subline-surface="in-place">
@@ -197,7 +179,7 @@ export function TranslatedInPlace({ original, translation, glyph = "✦" }: { or
  * A custom status written in a code (morse, binary, braille...): decoded on
  * this computer, IN PLACE, as the reply bar shows a coded quote ("decoded ·
  * morse · HELLO"). When the decoded text is in another language, its
- * translation shows instead ("decoded · morse · ≈ hello"). The status as
+ * translation shows instead ("decoded · morse · ✦ hello"). The status as
  * written is the tooltip. Null when the status holds no code.
  */
 export function DecodedStatus({ text }: { text: string; }) {

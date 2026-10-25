@@ -12,7 +12,8 @@
  * checked again on every render against the reading language of that moment.
  * The tooltip or line never shows an empty answer, or one that only hands
  * the name back (sayNothingNew), and never shows while an answer is still
- * on its way: a tooltip that says nothing is never shown.
+ * on its way by itself: a tooltip that says nothing is never shown. Only a ✦
+ * the reader clicked for shows "✦ …" while it is out.
  *
  * LAZY, AND ONLY ON A REST. A name's tooltip opens after the pointer rests
  * on it for NAME_TIP_DWELL_MS, as Discord's own tooltips do. Passing over
@@ -20,19 +21,16 @@
  * once the tooltip is open. The profile card is the exception: it is opened
  * on purpose, and shows its line at once.
  *
- * ✦ WHEN GOOGLE HAS NOTHING (AI plans). A name in a script the reader cannot
- * read that Google hands back, skips or is unsure of, still opens its
- * tooltip on an AI plan, as "Translation: ✦" with only the button: the AI
- * may read it (owner decision 2026-10-16). Only once Google has answered,
- * never while it is still on its way, and never on Automatic. A name only in
- * letters of a script no reading language uses (runes: names.ts aiOnlyName)
- * is never sent to Google at all, and gets the same ✦ alone.
+ * ✦ BY ITSELF (0.2.9, spec decision 14). A name in a script the reader
+ * cannot read is asked of ✦ when its tooltip opens (or its profile card
+ * shows), cached and reused. There is no Google line any more.
  *
- * ✦ FOR AI PLANS. Next to a translation, the tooltip and the profile line
- * carry a small ✦ button that asks the relay for that name
- * (SurfaceService.askQuality). Automatic plans get no ✦. The tooltip stays
- * open while the pointer moves onto it, so the button can be reached; a
- * click never reaches Discord's own handlers around the name (the popout,
+ * ✦ ON A CLICK, ONLY FOR RUNES. A name only in letters of a script no reading
+ * language uses (runes: names.ts aiOnlyName) is never sent by itself: its
+ * tooltip offers "Translation: ✦" with only the button, which asks the relay
+ * for it (SurfaceService.askQuality, owner decision 2026-10-16). The tooltip
+ * stays open while the pointer moves onto it, so the button can be reached;
+ * a click never reaches Discord's own handlers around the name (the popout,
  * the context menu).
  *
  * FAIL SAFE. Every hook runs first and unconditionally; everything after is
@@ -56,30 +54,23 @@ import { React, Tooltip } from "@webpack/common";
 
 import type { SurfaceEntry } from "./cache";
 import { aiOnlyName, nameToTranslate, pronounsToTranslate, sayNothingNew } from "./names";
-import { currentSurfaceService, fastUnsure, translationDir } from "./ui";
+import { currentSurfaceService, translationDir } from "./ui";
 
 export interface NameDisplay {
-    glyph: "≈" | "✦";
+    glyph: "✦";
     text: string;
 }
 
 /**
- * What to show for a name's cached entry: ✦ when there is one, else Google's
- * ≈ unless it is unsure (the same rule as every surface). Never an answer
- * that says nothing new about `originals` (the name as Discord shows it and
- * as it was sent): then Google's text is shown, still marked ✦ when ✦ was
- * asked (the AI checked it and had nothing better, so the press always
- * shows a change: owner test 2026-10-16), then nothing. Null otherwise.
+ * What to show for a name's cached entry: its ✦ answer, never one that says
+ * nothing new about `originals` (the name as Discord shows it and as it was
+ * sent). A ✦ that says nothing new means the AI kept the name as it is:
+ * nothing is shown (owner 2026-10-19). Null otherwise.
  */
 export function nameDisplay(entry: SurfaceEntry | null | undefined, source: string, ...originals: unknown[]): NameDisplay | null {
-    if (!entry) return null;
-    const q = entry.quality?.text.trim();
-    if (q && !sayNothingNew(q, source, ...originals)) return { glyph: "✦", text: q };
-    const f = entry.fast;
-    if (!f || fastUnsure(f, source)) return null;
-    const t = f.text.trim();
-    if (sayNothingNew(t, source, ...originals)) return null;
-    return { glyph: entry.quality ? "✦" : "≈", text: t };
+    if (!entry?.quality) return null;
+    const q = entry.quality.text.trim();
+    return sayNothingNew(q, source, ...originals) ? null : { glyph: "✦", text: q };
 }
 
 /* ----------------------------------------------------- the open tooltip -- */
@@ -235,9 +226,8 @@ export function AskAiButton({ text }: { text: string; }) {
  */
 const TIP_POINTER = { disableTooltipPointerEvents: false } as any;
 
-/** What the tooltip says after "Translation:": "≈ …" or "✦ …", or "✦ …" (the dots) while a ✦ asked for is on its way. */
-function tipBody(shown: NameDisplay, waitingQuality: boolean): string {
-    if (waitingQuality) return `${NAMES_COPY.aiGlyph} ${NAMES_COPY.waiting}`;
+/** What the tooltip says after "Translation:": "✦ …". */
+function tipBody(shown: NameDisplay): string {
     return `${shown.glyph} ${shown.text}`;
 }
 
@@ -249,7 +239,8 @@ function tipBody(shown: NameDisplay, waitingQuality: boolean): string {
  * reads now renders Discord's child alone, and asks nothing.
  *
  * The tooltip opens only once the pointer has rested on the name and there
- * is a translation that says something new; it asks Google only while open.
+ * is a translation that says something new; it asks ✦ only while open. A
+ * runes-only name offers ✦ alone, and shows "✦ …" once it is clicked.
  */
 export function NameHover({ original, name }: { original: unknown; name: unknown; }) {
     useNameUpdates();
@@ -257,22 +248,19 @@ export function NameHover({ original, name }: { original: unknown; name: unknown
     try {
         const service = currentSurfaceService();
         if (service === null) return (original ?? null) as any;
-        const google = nameToTranslate(name, service.readingLanguage());
-        const text = google ?? aiOnlyName(name);
+        const readable = nameToTranslate(name, service.readingLanguage());
+        const text = readable ?? aiOnlyName(name);
         if (text === null) return (original ?? null) as any;
         const open = isNameTipOpen(id);
-        // Asked for only while open: a rest on the name, never a render. An
-        // AI-only name is never sent to Google.
-        const entry = open ? service.want(text, { name: true, noGoogle: google === null }) : service.peek(text);
+        // Asked for only while open: a rest on the name, never a render. A
+        // runes-only name waits for the reader's ✦ click.
+        const entry = open ? service.want(text, { name: true, askOnly: readable === null }) : service.peek(text);
         const shown = nameDisplay(entry, text, name);
-        const askedWaiting = service.waiting(text, "quality");
-        const waitingQuality = shown !== null && askedWaiting;
-        // No ✦ once one came back, even one that said nothing new: asking again gets the same.
-        const canAsk = shown !== null && !entry?.quality && !waitingQuality && service.canAskQuality();
-        // Google is done and had nothing: an AI plan is still offered ✦ alone.
-        const offerOnly = shown === null && !askedWaiting && !entry?.quality
-            && !service.waiting(text, "fast") && service.canAskQuality();
-        const visible = open && (shown !== null || offerOnly || askedWaiting);
+        // Only a click shows the dots: an automatic answer on its way shows nothing.
+        const waiting = shown === null && readable === null && service.waiting(text);
+        // A runes-only name ✦ has not answered: an AI plan is offered ✦ alone.
+        const offerOnly = shown === null && !waiting && readable === null && !entry?.quality && service.canAskQuality();
+        const visible = open && (shown !== null || offerOnly || waiting);
         const tip = (
             <span
                 data-subline-name-tip=""
@@ -280,9 +268,9 @@ export function NameHover({ original, name }: { original: unknown; name: unknown
                 onMouseLeave={() => leaveNameTip(id)}
             >
                 {NAMES_COPY.label}{" "}
-                {shown !== null && <span dir={translationDir()}>{tipBody(shown, waitingQuality)}</span>}
-                {shown === null && askedWaiting && <span>{NAMES_COPY.aiGlyph} {NAMES_COPY.waiting}</span>}
-                {(canAsk || (offerOnly && !askedWaiting)) && <AskAiButton text={text} />}
+                {shown !== null && <span dir={translationDir()}>{tipBody(shown)}</span>}
+                {waiting && <span>{NAMES_COPY.aiGlyph} {NAMES_COPY.waiting}</span>}
+                {offerOnly && <AskAiButton text={text} />}
             </span>
         );
         return (
@@ -343,13 +331,13 @@ const PROFILE_LINE_STYLE = { fontSize: "0.8rem", color: "var(--text-muted)", mar
 
 /**
  * The profile card's line: under the name, after the pronouns, small and
- * grey. ONE mark for the whole line, at its start: "≈ Wang Xiaoming · he/him",
- * with the ✦ button at the end for an AI plan; "✦ Li Xiaolong · he/him" once
- * the AI checked every part of it (owner rule 2026-10-16: keep it simple,
- * never two ✦ on one line).
- * Only names and pronouns in a script the reader does not read, checked
- * for the reading language of this render. Null (Discord's own card,
- * untouched) when nothing in it says something new: never a lone ✦.
+ * grey. ONE ✦ for the whole line, at its start: "✦ Wang Xiaoming · he/him"
+ * (owner rule 2026-10-16: keep it simple, never two ✦ on one line). Every
+ * part asks ✦ by itself (0.2.9), except a runes-only name, which the line's
+ * ✦ button asks for (on an AI plan). Only names and pronouns in a script the
+ * reader does not read, checked for the reading language of this render.
+ * Null (Discord's own card, untouched) when nothing in it says something new:
+ * never a lone ✦.
  */
 export function ProfileNameLine({ texts }: { texts: ProfileNameTexts; }) {
     useNameUpdates();
@@ -360,15 +348,11 @@ export function ProfileNameLine({ texts }: { texts: ProfileNameTexts; }) {
         const parts: string[] = [];
         const seen = new Set<string>();
         let pending = false;
-        /** Every part shown has a ✦ answer: the line's mark is ✦. */
-        let allChecked = true;
-        /** Everything on the line with no ✦ yet, names and pronouns: ONE ✦ asks for all of it. */
+        /** Runes-only names ✦ has not answered: ONE ✦ asks for all of them. */
         const unasked: string[] = [];
         const names = new Map<string, unknown>();
-        /** Names Google cannot read (runes): never sent to Google, ✦ only. */
+        /** Names only the AI might read (runes): never sent by themselves. */
         const aiOnly = new Set<string>();
-        /** A name still waiting for Google: no ✦ offer on an empty line yet. */
-        let googleWaiting = false;
         for (const raw of Array.isArray(texts.names) ? texts.names : []) {
             let text = nameToTranslate(raw, target);
             if (text === null) {
@@ -378,33 +362,28 @@ export function ProfileNameLine({ texts }: { texts: ProfileNameTexts; }) {
             if (text !== null && !names.has(text)) names.set(text, raw);
         }
         for (const [name, raw] of names) {
-            const entry = service.want(name, { name: true, noGoogle: aiOnly.has(name) });
-            if (!aiOnly.has(name) && service.waiting(name, "fast")) googleWaiting = true;
+            const entry = service.want(name, { name: true, askOnly: aiOnly.has(name) });
             const shown = nameDisplay(entry, name, raw, ...names.keys());
             if (shown !== null && !seen.has(shown.text)) {
                 seen.add(shown.text);
                 parts.push(shown.text);
             }
-            if (shown !== null && shown.glyph !== "✦") allChecked = false;
-            if (service.waiting(name, "quality")) pending = true;
-            else if (!entry?.quality) unasked.push(name);
+            // Only a click shows the dots: an automatic answer on its way shows nothing.
+            if (aiOnly.has(name) && service.waiting(name)) pending = true;
+            else if (aiOnly.has(name) && !entry?.quality) unasked.push(name);
         }
         const pronouns = pronounsToTranslate(texts.pronouns, target);
         if (pronouns !== null) {
             const entry = service.want(pronouns, { name: true });
             const shown = nameDisplay(entry, pronouns, texts.pronouns);
             if (shown !== null) parts.push(shown.text);
-            if (shown !== null && shown.glyph !== "✦") allChecked = false;
-            if (service.waiting(pronouns, "quality")) pending = true;
-            else if (shown !== null && !entry?.quality) unasked.push(pronouns);
         }
         const canAsk = !pending && unasked.length > 0 && service.canAskQuality();
         if (parts.length === 0) {
-            // Nothing to show yet, but the AI may read it (runes, or Google
-            // had nothing): "Translation: ✦" on an AI plan, as in a name's
-            // tooltip (owner decision 2026-10-16). Never while Google is on
-            // its way, never on Automatic.
-            if (!pending && !(canAsk && !googleWaiting)) return null;
+            // Nothing to show yet: "Translation: ✦" with the button for runes
+            // on an AI plan, or "Translation: ✦ …" once it is clicked, as in a
+            // name's tooltip (owner decision 2026-10-16).
+            if (!pending && !canAsk) return null;
             return (
                 <div style={PROFILE_LINE_STYLE} data-subline-surface="profile-names">
                     {NAMES_COPY.label}
@@ -412,11 +391,9 @@ export function ProfileNameLine({ texts }: { texts: ProfileNameTexts; }) {
                 </div>
             );
         }
-        // ✦ at the start only when nothing is left to ask: never a ✦ mark and a ✦ button on one line.
-        const mark = allChecked && !pending && unasked.length === 0 ? NAMES_COPY.aiGlyph : "≈";
         return (
             <div style={PROFILE_LINE_STYLE} data-subline-surface="profile-names">
-                <span dir={translationDir()}>{`${mark} ${parts.join(" · ")}`}</span>
+                <span dir={translationDir()}>{`${NAMES_COPY.aiGlyph} ${parts.join(" · ")}`}</span>
                 {pending && <span> {NAMES_COPY.aiGlyph} {NAMES_COPY.waiting}</span>}
                 {canAsk && <ProfileAskAi names={unasked} />}
             </div>
@@ -440,7 +417,7 @@ export function SafeProfileNameLine({ handler, ...props }: { texts: ProfileNameT
     );
 }
 
-/** The profile line's one ✦: asks the relay for each name and the pronouns on the card that have no ✦ yet. */
+/** The profile line's one ✦: asks the relay for each runes-only name on the card that has no ✦ yet. */
 function ProfileAskAi({ names }: { names: string[]; }) {
     return (
         <span

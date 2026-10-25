@@ -113,19 +113,45 @@ export function customStatusText(activities: unknown): string {
     return str(status?.state).trim();
 }
 
-/** An onboarding prompt's own text: its question, and each option's title and description. */
-export function onboardingPromptTexts(prompt: unknown): SurfaceText[] {
+/** One onboarding option as its card shows it: the title, then the description. */
+export function onboardingOptionTexts(option: unknown): SurfaceText[] {
     const out: SurfaceText[] = [];
-    if (prompt === null || typeof prompt !== "object") return out;
-    const p = prompt as Record<string, any>;
-    push(out, "onboarding", "Question", p.title);
-    if (Array.isArray(p.options)) {
-        for (const o of p.options) {
-            push(out, "onboarding", "Option", o?.title);
-            push(out, "onboarding", "Option", o?.description);
-        }
-    }
+    if (option === null || typeof option !== "object") return out;
+    const o = option as Record<string, unknown>;
+    push(out, "onboarding", "Option", o.title);
+    push(out, "onboarding", "Option", o.description);
     return out;
+}
+
+/** Discord's prompt type for a drop-down question (its onboarding module: MULTIPLE_CHOICE 0, DROPDOWN 1). */
+export const ONBOARDING_DROPDOWN = 1;
+
+/**
+ * What goes under an onboarding question. `lines`: the question's own
+ * translation. `pairs`: options whose original is NOT on screen next to where
+ * the line shows, so each line carries its original ("original ≈ translation").
+ *
+ * - Option cards: each card shows its own lines (the card patch), so nothing
+ *   of the options goes here. When the card patch is not live (`cardsLive`
+ *   false: Discord moved the card), every option's title and description.
+ * - A drop-down: its options are hidden until it is opened, and it never
+ *   shows a description. Each option's title.
+ *
+ * Any type Discord adds later is read as option cards.
+ */
+export function onboardingHeadingTexts(prompt: unknown, cardsLive: boolean): { lines: SurfaceText[]; pairs: SurfaceText[]; } {
+    const lines: SurfaceText[] = [];
+    const pairs: SurfaceText[] = [];
+    if (prompt === null || typeof prompt !== "object") return { lines, pairs };
+    const p = prompt as Record<string, any>;
+    push(lines, "onboarding", "Question", p.title);
+    const options: unknown[] = Array.isArray(p.options) ? p.options : [];
+    if (p.type === ONBOARDING_DROPDOWN) {
+        for (const o of options) push(pairs, "onboarding", "Option", (o as any)?.title);
+    } else if (!cardsLive) {
+        for (const o of options) pairs.push(...onboardingOptionTexts(o));
+    }
+    return { lines, pairs };
 }
 
 /** The names of the tags applied to a forum post, looked up on its parent forum. */

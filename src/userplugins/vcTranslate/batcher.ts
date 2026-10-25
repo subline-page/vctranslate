@@ -14,10 +14,7 @@ export interface BatcherOptions {
     /**
      * How long the window from a burst's first message is. A function is
      * consulted each time a timer is ARMED — not per message, and never for a
-     * window already running — so a caller can pick the window from live state
-     * (the quality tier shortens its 20s to the fast 700ms while Google is
-     * cooling down, because its long window is justified by "the reader is
-     * already looking at a Google line", which is false exactly then).
+     * window already running — so a caller can pick the window from live state.
      */
     debounceMs: number | (() => number);
     maxBatch: number;

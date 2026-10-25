@@ -1,4 +1,4 @@
-import type { ChatBarProps } from "@api/ChatButtons";
+import { ChatBarButton, type ChatBarProps } from "@api/ChatButtons";
 import * as DataStore from "@api/DataStore";
 import { addMessageAccessory, removeMessageAccessory } from "@api/MessageAccessories";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
@@ -39,18 +39,18 @@ import {
 } from "./account";
 import { openLinkWindow, silentLinkAttempt } from "./link";
 import { runBrowserLink } from "./linkFallback";
+import { priceSeenApplies, sendEvent, setEventSource } from "./events";
 import {
     type AccountView, askPairCode, fill, moveDate, openAccountConfirm, openElsewherePlanChoice, openMessage, openMoveHere, openMoveStart, openPayElsewhere,
     setPanelCrashHandler
 } from "./linkPanels";
 import type { RelayRefusal } from "./native";
-import { contentHash, loadPreviewLedger, PRICING_URL, rememberPreview, type PreviewResult } from "./freePlan";
+import { contentHash, loadPreviewLedger, rememberPreview, type PreviewResult } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
-    resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit, tuneRateGateToProviderBudget
+    resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit
 } from "./rateGate";
 import { languageLabel } from "./langLabel";
-import { isRomanizedGuess } from "./romanized";
 import settings from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { toast, type ToastKind } from "./toast";
@@ -65,39 +65,39 @@ import {
 } from "./statusBeacon";
 import { BUILD_ID, PLUGIN_VERSION, type BeaconErrorCode } from "./statusShape";
 import {
-    clearLanguage, clearStore, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
+    clearLanguage, clearStore, dropDeferred, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import {
-    ENGINE_CAPS, FAST_DEBOUNCE_MS, GOOGLE_COOLDOWN_MS, FAST_MAX_BATCH, MIN_DETECT_CONFIDENCE,
-    QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH, SHORT_TEXT_MAX,
+    ENGINE_CAPS, QUALITY_DEBOUNCE_MS, QUALITY_MAX_BATCH,
     type BatchRequest, type EngineId, type PendingMessage, type Result
 } from "./types";
-import { ENGINE_RANK, isRealTranslation, mayReplace } from "./upgrade";
+import { isRealTranslation, mayReplace, rankOf } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Plan, type ReservedTab, reserveTab } from "./checkout";
 import { isRtlLang, normalizeTargetLang } from "./languages";
-import { isPaymentPending, openUpgrade, registerUpgradeOpener, setPaymentPending, settingsShowing } from "./upgradeBridge";
-import { ACCOUNT_COPY, ADDON_RELOAD_COPY, FALLBACK_COPY, LINK_COPY, MOVE_COPY, SUPPORT_EMAIL, UPGRADE_COPY } from "./upgradeCopy";
+import { isPaymentPending, openUpgrade, registerUpgradeOpener, setPaymentPending, settingsShowing, subscribePaymentPending } from "./upgradeBridge";
+import { ACCOUNT_COPY, ADDON_RELOAD_COPY, FALLBACK_COPY, LINK_COPY, MOVE_COPY, PLAN_COPY, SUPPORT_EMAIL, UPGRADE_COPY, WHATS_NEW_URL } from "./upgradeCopy";
+import { emptyNotes, endedDue, lastDayDue, notesFrom, type PlanNotes, planView, type PlanView, updateTextFor, withNote } from "./planState";
+import { accessFrom, NEW_DAYS_FALLBACK } from "./planAccess";
 import {
-    closePanel, type CodeSubmitResult, openActivatePanel, openCodeEntry, openPaymentPendingPanel, openUpgradePanel
+    closePanel, type CodeSubmitResult, openCodeEntry, openEndedPanel, openPlanPanel, openUpdatePanel
 } from "./upgradePanel";
-import { createUpdateWatch, UPDATE_CHECK_INTERVAL_MS, type UpdateWatch } from "./updateNotice";
+import { createUpdateWatch, isReleaseNotesUrl, releaseNotesUrl, UPDATE_CHECK_INTERVAL_MS, UPDATE_NOTICE_COPY, type UpdateWatch } from "./updateNotice";
 import { buildNumberFromVencord, createPatchHealthWatch, HEALTH_STORE_KEY, runPatchHealthCheck, scanFromVencord, type PatchHealthWatch } from "./patchHealth";
 import { APP_DOWNLOAD_URL, APP_NOTICE_COPY, checkAppNotice } from "./appNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
 import {
-    messageSurfaceTexts, onboardingPromptTexts,
+    messageSurfaceTexts, onboardingHeadingTexts, onboardingOptionTexts,
     type SurfaceKind, type SurfaceText
 } from "./surfaces/extract";
-import { splitEdgeMentions, withEdgeMentions } from "./mentionEdges";
 import { aiOnlyName, nameToTranslate, pronounsToTranslate } from "./surfaces/names";
 import { resetNameTips, SafeNameHover, SafeProfileNameLine } from "./surfaces/namesUi";
 import { SURFACE_PATCHES } from "./surfaces/patches";
 import { guard, guardCatchesSoFar, guardHook, type HandlerId, isFeatureOff, setGuardCatchSink } from "./surfaces/guard";
 import { type FeatureId, offListFrom } from "./surfaces/features";
 import { createGuardHealth, GUARD_STORE_KEY, type GuardHealth } from "./guardHealth";
-import { SurfaceService, type SurfaceOutcome, type SurfaceSendOptions, type SurfaceTier } from "./surfaces/service";
+import { SurfaceService, type SurfaceOutcome, type SurfaceSendOptions } from "./surfaces/service";
 import {
     BioInPlace, currentSurfaceService, DecodedStatus, resetInPlaceFlips, safe, setSurfaceRtl, setSurfaceService, StatusBubbleText, SurfaceLines, tightTranslation, TightSwap,
     useSurfaceVersion
@@ -107,11 +107,12 @@ import { isDesktop, onWebAddonGone, transport } from "./transport";
 
 const logger = new Logger("VcTranslate");
 
-// Two independent pipelines over the same messages. The fast one exists so the
-// reader never sits in front of an untranslated message; the quality one
-// exists so what they end up reading is right. Neither waits on the other.
-let fastBatcher: Batcher | null = null;
+// THE ONE PIPELINE (0.2.9, AI only). Every message goes to ✦ (the relay):
+// Google's fast ≈ tier and the short-message judge are gone (spec decision 1).
+// Null while ✦ is off for this account (rebuildBatcher), and while stopped.
 let qualityBatcher: Batcher | null = null;
+/** start() ran and stop() has not: what used to be "the fast batcher exists". */
+let running = false;
 // Watches for a Subline update staged on disk but not yet loaded (updateNotice.ts).
 let updateWatch: UpdateWatch | null = null;
 /** helperKick.ts: first ask a minute after start, then every 5 minutes while Discord is open. */
@@ -181,23 +182,6 @@ function startGuardHealth(): void {
     for (const handler of new Set(guardCatchesSoFar())) watch.note(handler);
 }
 
-let sessionFallback = false;   // set when the configured LLM engine is unusable this session
-/**
- * Which engine+key `sessionFallback` was set against.
- *
- * The pin exists so a rejected key is not retried every batch. But it used to
- * outlive the key itself: Vencord persists a settings field on every keystroke,
- * so a batch firing while a key is half-pasted gets a 401, pins the session,
- * and stays pinned after the correct key lands. The user is then left with a
- * valid key, no LLM calls, no error on screen, and — because `effectiveEngine()`
- * reports google — not even the quota indicator that would have hinted at it.
- *
- * Recording WHAT was rejected makes the pin mean "this credential is bad"
- * rather than "this session is bad", so changing the key or the engine lifts
- * it and nothing else does.
- */
-let fallbackPinnedFor: string | null = null;
-
 /**
  * Quality translations already produced this session, keyed by exact source
  * text and target language.
@@ -207,9 +191,7 @@ let fallbackPinnedFor: string | null = null;
  * two answers to one question, in a chat where both were on screen together.
  * And the second answer cost a request the first had already paid for.
  *
- * Only LLM results go in. Google's are cheap enough that the round trip is not
- * worth avoiding, and its habit of echoing short or romanised text back
- * unchanged would poison the map with non-translations.
+ * Only real ✦ lines go in, never a skip or a marker.
  *
  * Keyed on the EXACT string, so it can only ever fire on a genuine repeat.
  *
@@ -246,7 +228,7 @@ function phraseKey(text: string, targetLang: string): string {
 
 function rememberPhrase(text: string, targetLang: string, value: StoredTranslation): void {
     if (!isRealTranslation(value)) return;
-    if (ENGINE_RANK[value.via] < 1) return;   // quality tier only
+    if (rankOf(value.via) < 1) return;   // quality tier only
     // P7: a short line is never reused, so it is not worth keeping either.
     if (wordCount(text) < PHRASE_REUSE_MIN_WORDS) return;
     if (qualityPhrases.size >= MAX_CACHED_PHRASES) {
@@ -257,34 +239,32 @@ function rememberPhrase(text: string, targetLang: string, value: StoredTranslati
     }
     qualityPhrases.set(phraseKey(text, targetLang), value);
 }
-/** Why the pin was set, so the indicator does not have to guess. */
-let fallbackKind: FallbackKind = "key";
-let announcedMissingKey = false;   // one toast per session, never per batch
-let announcedCooldown = false;     // ditto, for a rate-limited quality tier
+let announcedCooldown = false;     // one toast per session, never per batch
 
-// Ids currently queued in a batcher or awaiting a translateBatch response.
+// Ids currently queued in the batcher or awaiting a translateBatch response.
 // getTranslation() alone can't tell "in flight" apart from "never
-// requested" -- a message is a cache miss for the WHOLE round trip (its
-// tier's debounce window, 700ms fast / 20s quality, plus several seconds of
-// network for an LLM), not just briefly.
-// Populated wherever a message is handed to batcher.add(), and drained in
-// runTier once that request settles (success, failure, or stranded by a
-// rebuild) so it becomes retryable again.
-//
-// Per tier, because a message is legitimately in flight on both at once. A
-// single shared set would let whichever tier queued first silently suppress
-// the other — the quality tier would simply never run.
-const inFlightFast = new Set<string>();
+// requested" -- a message is a cache miss for the WHOLE round trip (the
+// debounce window, up to 3s, plus several seconds of network), not just
+// briefly. Populated wherever a message is handed to batcher.add(), and
+// drained in runTier once that request settles (success, failure, or
+// stranded by a rebuild) so it becomes retryable again.
 const inFlightQuality = new Set<string>();
+
+/**
+ * ✦ message requests really out right now: past the rate gate, waiting on
+ * the network. Surfaces wait for these (MESSAGES FIRST, translateSurfaceBatch),
+ * not for `inFlightQuality`: that set also holds every message still in the
+ * batcher's 3 s window, so in a busy channel it is almost never empty, and
+ * with no ≈ underneath the surfaces then got no translation at all.
+ */
+let qualityRequestsOut = 0;
 
 /**
  * Ids currently out on the MANUAL ⚡ force-quality path, purely so
  * `TranslationAccessory` can show a `⚡ translating…` hint while one is
  * outstanding. Deliberately NOT the same thing as `inFlightQuality` above:
- * that set also covers the automatic quality tier (live chat, catch-up),
- * and this indicator is scoped to the manual click only — the fast tier
- * lands in about a second and an indicator under every incoming message
- * would be noise, not help.
+ * that set also covers the automatic batches (live chat, catch-up), and
+ * this indicator is scoped to the manual click only.
  *
  * Deliberately NOT written into the translation store either. store.ts's
  * `StoredTranslation` union is four RESOLVED states that catch-up's
@@ -300,47 +280,106 @@ const forcedInFlight = new Set<string>();
 const forcedInFlightListeners = new Set<() => void>();
 
 /**
- * Channels that currently hold deferred (⏳) messages from the fast tier.
- *
- * THE GAP THIS CLOSES, observed 2026-09-03: deferred messages were retried
- * only by catch-up, which runs on channel open and scroll. A reader sitting
- * IN the channel while Google throttled saw "waiting for the translator…"
- * hold forever, because nothing ever retried — the wait was unbounded and
- * the copy, while honest about the state, was a lie about the trajectory.
- *
- * The heal is event-driven, like the reactive quality flush: the first fast
- * flush that SUCCEEDS in a marked channel proves Google is answering again
- * and re-runs catch-up for that channel, which re-enqueues everything still
- * deferred. Partial recoveries converge: each sweep translates some and
- * re-defers the rest, and the next success sweeps again; a full failure
- * writes no success, triggers no sweep, and the cooldown brakes the loop.
+ * ⚡ pressed while an AUTOMATIC request for the same message was already out
+ * (see forceQualityTranslate). Released in runTier's finally once that
+ * request settles: forced then, unless it brought a line (decision 3: ⚡
+ * always gives a translation, and an automatic answer may be a skip).
  */
-const deferredChannels = new Set<string>();
+const forceAfterFlight = new Map<string, Message>();
+
+/** The automatic request for these ids settled: run each waiting ⚡ press, unless a line came. */
+function releaseForcedAfterFlight(ids: readonly string[]): void {
+    for (const id of ids) {
+        const message = forceAfterFlight.get(id);
+        if (message === undefined) continue;
+        forceAfterFlight.delete(id);
+        forcedInFlight.delete(id);
+        if (isRealTranslation(getTranslation(makeKey(id, settings.store.targetLang)))) {
+            notifyForcedInFlight();
+            continue;
+        }
+        void forceQualityTranslate(message);
+    }
+}
 
 /**
- * A timed retry for each channel holding ⏳ lines. The recovery sweep above
- * needs a LATER success in the same channel, so in a quiet DM one failed call
- * left "waiting for the translator" up until someone else posted (measured:
- * still deferred after 10 minutes, one request ever sent). The timer asks
- * again after 15s (or when Google's cooldown ends, if later), doubling up to
- * 2 minutes while it keeps failing. A successful sweep resets it.
+ * Channels that currently hold deferred (⏳) messages: ✦ requests that never
+ * reached a verdict (no answer, a 5xx, a rate limit, the relay cooling down,
+ * the hidden daily ceiling). With ✦ the only engine, such a message must
+ * never sit blank for good with no sign (0.2.9): it wears the quiet ⏳ line
+ * and is asked again.
+ *
+ * Two ways back. The first ✦ flush that SUCCEEDS in a marked channel proves
+ * the relay is answering again and re-runs catch-up for that channel, which
+ * re-enqueues everything still deferred. And a timer per channel asks again
+ * by itself (armDeferredRetry), because in a quiet DM no later success may
+ * ever come. Partial recoveries converge: each sweep translates some and
+ * re-defers the rest; a full failure writes no success, triggers no sweep,
+ * and the cooldown and the growing delay brake the loop.
+ *
+ * KEPT PER MESSAGE, not per channel: catch-up takes the newest
+ * `catchUpCount` (20) messages that still need ✦ per pass, so a busy channel
+ * with 45 messages waiting needs three passes. The channel stays marked, and
+ * every success in it sweeps again, until no message in it still waits.
+ * Bounded per channel, oldest first out.
+ */
+const deferredChannels = new Map<string, Set<string>>();
+const MAX_WAITING_PER_CHANNEL = 500;
+
+/** These messages have no verdict yet and are asked again by themselves (see deferredChannels). */
+function noteWaiting(channelId: string, ids: readonly string[]): void {
+    let set = deferredChannels.get(channelId);
+    if (set === undefined) {
+        set = new Set();
+        deferredChannels.set(channelId, set);
+    }
+    for (const id of ids) {
+        set.delete(id);
+        set.add(id);
+    }
+    while (set.size > MAX_WAITING_PER_CHANNEL) set.delete(set.values().next().value as string);
+}
+
+/**
+ * Does any message in this channel still wait for ✦? A message that got its
+ * verdict meanwhile (a line, a skip, the quiet ⚠), or whose entry the store
+ * no longer holds as waiting, is dropped from the channel's list here.
+ */
+function stillWaiting(channelId: string): boolean {
+    const set = deferredChannels.get(channelId);
+    if (set === undefined) return false;
+    const lang = settings.store.targetLang;
+    for (const id of [...set]) {
+        const e = getTranslation(makeKey(id, lang));
+        if (e !== undefined && !("deferred" in e)) set.delete(id);
+    }
+    if (set.size === 0) deferredChannels.delete(channelId);
+    return set.size > 0;
+}
+
+/**
+ * A timed retry for each channel holding ⏳ lines. The timer asks again after
+ * 15s (or just after the relay's cooldown ends, if later: a 429's wait, or
+ * UTC midnight for the hidden ceiling), doubling up to 2 minutes while it
+ * keeps failing. A successful sweep resets it. Relay down for an hour costs
+ * about 30 requests per channel on screen, never a storm.
  */
 const deferredRetries = new Map<string, { timer: ReturnType<typeof setTimeout> | null; nextDelayMs: number; }>();
-const DEFERRED_RETRY_FIRST_MS = 15_000;
-const DEFERRED_RETRY_MAX_MS = 120_000;
+export const DEFERRED_RETRY_FIRST_MS = 15_000;
+export const DEFERRED_RETRY_MAX_MS = 120_000;
 
 function armDeferredRetry(channelId: string): void {
     const state = deferredRetries.get(channelId) ?? { timer: null, nextDelayMs: DEFERRED_RETRY_FIRST_MS };
     deferredRetries.set(channelId, state);
     if (state.timer !== null) return;
-    const cooling = cooldownUntil("google") - Date.now();
-    // Just after the cooldown when there is one: asking inside it is refused
+    const cooling = relayWaitUntil() - Date.now();
+    // Just after the cooldown (or a hold) when there is one: asking inside it is refused
     // untried. A little jitter keeps several channels from asking at once.
     const delay = Math.max(cooling > 0 ? cooling + 500 + Math.floor(Math.random() * 1_000) : 0, state.nextDelayMs);
     state.timer = setTimeout(() => {
         state.timer = null;
         state.nextDelayMs = Math.min(state.nextDelayMs * 2, DEFERRED_RETRY_MAX_MS);
-        if (!deferredChannels.has(channelId)) {
+        if (!stillWaiting(channelId)) {
             deferredRetries.delete(channelId);
             return;
         }
@@ -354,6 +393,21 @@ function clearDeferredRetry(channelId: string): void {
     const state = deferredRetries.get(channelId);
     if (state?.timer) clearTimeout(state.timer);
     deferredRetries.delete(channelId);
+}
+
+/**
+ * ✦ turned off (a period ended, a plan lapsed): nothing will ask again by
+ * itself, so no ⏳ may still say "translating…". Every ⏳ line goes (the
+ * message shows nothing, as any message does with ✦ off), and the waiting
+ * lists and their retry timers with them. ✦ on again: catch-up asks for
+ * whatever is on screen, as for a message never asked.
+ */
+function dropAllWaiting(): void {
+    const lang = settings.store.targetLang;
+    for (const ids of deferredChannels.values()) for (const id of ids) dropDeferred(makeKey(id, lang));
+    deferredChannels.clear();
+    for (const state of deferredRetries.values()) if (state.timer) clearTimeout(state.timer);
+    deferredRetries.clear();
 }
 
 function notifyForcedInFlight(): void {
@@ -373,11 +427,9 @@ function isForcedInFlight(messageId: string): boolean {
 
 /**
  * Why the manual ⚡ click gets a self-reported failure hint and the batched
- * pipeline never does — see runTier's own comment for the reasoning ("a
- * quality failure is invisible by design"). That silence is correct for an
- * AUTOMATIC batch: nothing the reader did caused it, and an error marker
- * would take away a readable Google line for information they cannot act on.
- * A manual click is different — the user spent a scarce request on purpose,
+ * pipeline does not. An AUTOMATIC batch that fails stays quiet: the message
+ * wears the ⏳ line and is asked again by itself (see deferredChannels), and
+ * nothing the reader did caused it. A manual click is different — the user spent a scarce request on purpose,
  * and "translating…" flashing then vanishing into silence reads as a bug,
  * not as nothing having happened.
  *
@@ -406,7 +458,7 @@ type ForcedHint =
 export const FORCED_HINT_TTL_MS = 5_000;
 
 /** Shown for a few seconds when a ✦ preview did not load. */
-export const PREVIEW_FAILED_HINT = "Preview didn't load. Try again.";
+export const PREVIEW_FAILED_HINT = "The AI translation didn't load. Press ⚡ to try again.";
 
 const forcedHints = new Map<string, ForcedHint>();
 const forcedHintTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -449,39 +501,38 @@ function forcedHintFor(messageId: string): ForcedHint | undefined {
 }
 
 /**
- * Store keys the quality tier has already SPENT A REQUEST on this session.
+ * Store keys ✦ has already SPENT A REQUEST on this session.
  *
- * THE BUG THIS EXISTS FOR: a quality-tier failure deliberately writes nothing
- * (see runTier) so the reader keeps their Google line. But that means the store
- * looks exactly as it did before the request — a `via: "google"` entry, which
- * needsQuality() correctly reads as "still upgradable". Nothing else remembered
- * the attempt, so every later catch-up offered the same message to the LLM
- * again: four CHANNEL_SELECTs produced four Gemini requests for one message,
- * and scrolling up (LOAD_MESSAGES_SUCCESS also drives catch-up) did the same.
- * A message the model routinely omits from a 25-message batch — llmShared.ts
- * marks those `failed` per id — could be re-requested forever, spending exactly
- * the quota the two-tier split exists to conserve.
+ * THE BUG THIS EXISTS FOR: catch-up runs on every channel open and every
+ * scroll-up (LOAD_MESSAGES_SUCCESS), and a message whose request went out but
+ * produced no line (the model omitted it from a 25-message batch, which the
+ * relay marks `failed` per id) looks exactly like one never asked about.
+ * Without a record of the attempt, every later catch-up offers it again:
+ * four channel opens were once four requests for one message.
  *
- * THE RULE: the quality tier gets ONE request per message per session. The
- * ledger is written at the moment the request is actually sent (not when it
- * fails), because the thing being bounded is REQUESTS SPENT — a flush that
- * returns early for a cooldown, a stale generation or the rate gate has cost
- * nothing and must stay retryable. A success needs no ledger entry to stop
- * repeating (its store write closes the message on its own), but marking it
- * anyway keeps the invariant one sentence long instead of two.
+ * THE RULE: ✦ gets one request per message per session that REACHES A
+ * VERDICT. The ledger is written at the moment the request is actually sent
+ * (runTier), because the thing being bounded is requests spent. It is given
+ * back (the message may be asked again) whenever nothing was judged:
+ *  - the whole request failed without a verdict (no answer, a 5xx, a 429,
+ *    the hidden ceiling, a refusal about the plan): ⏳, and asked again;
+ *  - the model omitted the message the FIRST time (omittedOnce): ⏳, and
+ *    asked again once. Omitted a second time, it keeps its charge and shows
+ *    the quiet ⚠ line; ⚡, an edit or a restart asks again.
+ * A success needs no ledger entry to stop repeating (its store write closes
+ * the message), but marking it anyway keeps the invariant short.
  *
- * THE TRADE-OFF, taken deliberately: a message whose one attempt failed
- * transiently never gets its ✦ this session. That costs the reader an
- * occasional missed upgrade, which is invisible — the readable ≈ line is still
- * there. Retrying instead costs the quota, which is not invisible: it takes the
- * quality tier down for every OTHER message too. A restart, or an edit (see
- * forgetQualityAttempts), is the natural retry point.
- *
- * In memory only, and deliberately not persisted: the store entry it qualifies
- * is what persists, and a new session is exactly the kind of natural retry
- * boundary a spent attempt should be forgotten at.
+ * In memory only, and deliberately not persisted: the store entry it
+ * qualifies is what persists, and a new session is a natural retry boundary.
  */
 const qualityAttempted = new Set<string>();
+
+/**
+ * Store keys the model omitted once already this session (see
+ * qualityAttempted). Bounded like the ledger, and forgotten with it on an
+ * edit (forgetQualityAttempts).
+ */
+const omittedOnce = new Set<string>();
 
 /**
  * The channel whose NEXT `LOAD_MESSAGES_SUCCESS` is still the initial backlog
@@ -547,162 +598,72 @@ function markQualityAttempted(key: string): void {
     }
 }
 
+/** The model left this message out of its answer once already (see qualityAttempted). */
+function noteOmitted(key: string): boolean {
+    if (omittedOnce.has(key)) return false;
+    omittedOnce.add(key);
+    while (omittedOnce.size > QUALITY_ATTEMPT_MEMORY) {
+        omittedOnce.delete(omittedOnce.values().next().value as string);
+    }
+    return true;
+}
+
 /**
  * Forget every attempt recorded for a message id, across target languages.
  *
  * Called next to invalidateMessage() — an edited message is a DIFFERENT text,
  * so the request already spent was spent on something that no longer exists.
- * Without this, editing a message the quality tier had already attempted would
- * leave it pinned to the fast tier's line forever. Same `"<id> "` prefix
- * discipline as invalidateMessage(), so message 7 does not match message 70.
+ * Same `"<id> "` prefix discipline as invalidateMessage(), so message 7 does
+ * not match message 70.
  */
 function forgetQualityAttempts(messageId: string): void {
     const prefix = `${messageId} `;
     for (const key of [...qualityAttempted]) {
         if (key.startsWith(prefix)) qualityAttempted.delete(key);
     }
+    for (const key of [...omittedOnce]) {
+        if (key.startsWith(prefix)) omittedOnce.delete(key);
+    }
 }
 
 // Bumped on every rebuildBatcher(). Each onFlush closure captures the
 // generation it was created under; if a response lands after a later
-// rebuild has already happened (settings changed mid-flight, or an LLM
-// engine's auth failure triggered the Google fallback), the closure's
-// `engine` is stale and writing under it would land under a key nobody reads
-// (or clobber the new engine's cache with a translation from the old one).
+// rebuild has already happened (the plan or the reading language changed
+// mid-flight), writing it would land under a key nobody reads, or for a plan
+// that no longer translates.
 let batcherGeneration = 0;
 
-/**
- * The key-gated engines, keyed by the setting that holds their API key and the
- * label used in the "no key set" / "rejected the key" toasts. A lookup table
- * rather than an `engine === "claude" || engine === "gemini"` conditional in
- * every function below — this is the one place that has to know which engines
- * exist, so adding a key-gated engine is one new entry here rather than a
- * growing tangle of per-function branches. Adding Groq proved that: this row
- * and the settings fields it names were the whole of it.
- */
-const LLM_ENGINES = {
-    claude: { keySetting: "anthropicApiKey", label: "Anthropic", credential: "Anthropic API key" },
-    gemini: { keySetting: "geminiApiKey", label: "Gemini", credential: "Gemini API key" },
-    groq: { keySetting: "groqApiKey", label: "Groq", credential: "Groq API key" },
-    // The relay's "key" is the Subline code. Everything key-gated (isLlmEngine,
-    // apiKeyFor, effectiveEngine's fallback-to-Google when the code is blank,
-    // the cooldown/rate-gate machinery) then treats the relay exactly like a
-    // keyed engine, because it reads THIS table rather than a hand-written list.
-    // `credential` is what the user calls the thing they pasted: a buyer never
-    // saw an "API key", so no message may ask them for one.
-    relay: { keySetting: "sublineCode", label: "Subline", credential: "Subline code" }
-} as const satisfies Record<
-    string,
-    {
-        keySetting: "anthropicApiKey" | "geminiApiKey" | "groqApiKey" | "sublineCode";
-        label: string;
-        credential: string;
-    }
->;
-
-/**
- * "Gemini rejected the API key" / "Subline rejected your Subline code". The
- * bring-your-own-key wording is unchanged; the relay names the code.
- */
-/** "cannot reach..." -> "Cannot reach...": a reason opening a toast. */
-function sentenceCase(text: string): string {
-    return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-function rejectedCredentialText(engine: LlmEngineId): string {
-    return engine === "relay"
-        ? "Your Subline code wasn't accepted"
-        : `${LLM_ENGINES[engine].label} rejected the API key`;
-}
-
-type LlmEngineId = keyof typeof LLM_ENGINES;
-
-/**
- * Asked of the table itself rather than of a hand-written list of ids, so the
- * table above stays the single place that knows which engines are key-gated —
- * a repeated `||` chain is exactly how a fourth engine would end up recognised
- * in some functions and silently not in others.
- */
-function isLlmEngine(id: EngineId): id is LlmEngineId {
-    return Object.prototype.hasOwnProperty.call(LLM_ENGINES, id);
-}
-
-/** The API key configured for a key-gated engine. */
-function apiKeyFor(engine: LlmEngineId): string {
-    return settings.store[LLM_ENGINES[engine].keySetting];
-}
-
-/**
- * The model name to send with a batch, or "" for an engine that has no such
- * setting (Google, and Claude — whose model is pinned in engines/claude.ts).
- *
- * Read at SEND time rather than captured when the batcher was built: a user
- * changing the model is almost always a user trying to escape a model that is
- * refusing them, and the next batch should already use the new one. "" means
- * "engine default" on the far side; the engine owns that fallback so the empty
- * string can never reach the wire as a model name.
- */
-function modelFor(engine: EngineId): string {
-    const configured = engine === "gemini"
-        ? settings.store.geminiModel
-        : engine === "groq"
-            ? settings.store.groqModel
-            : "";
-    return typeof configured === "string" ? configured.trim() : "";
-}
-
-/**
- * The engine actually in use — may differ from the configured one.
- *
- * ✦ (the relay) needs AI on the account. An Automatic owner's saved code is a
- * real Subline code, so the configured engine is "relay", but without AI there
- * is no quality tier for it: Google (≈) alone, plus the day's five ✦
- * previews from ⚡ (see previewPress). Everything that reads this
- * (the quality batcher, the ⚡ label, the chat-bar indicator) then treats an
- * Automatic owner as Google-only.
- */
-function effectiveEngine(): EngineId {
-    const base = baseEngine();
-    if (base === "relay" && entitlementLevel() !== "ai") return "google";
-    return base;
-}
-
-/** The engine the configuration and the session's pins allow, before the entitlement. */
-function baseEngine(): EngineId {
-    const configured = settings.store.engine as EngineId;
-    if (!isLlmEngine(configured)) return configured;
-    // An expired block lifts itself here rather than needing a settings change
-    // or a restart, which is the difference between a transient network fault
-    // and a wrong credential.
-    if (sessionFallback && fallbackExpiresAt !== null && Date.now() >= fallbackExpiresAt) {
-        sessionFallback = false;
-        fallbackExpiresAt = null;
-        fallbackPinnedFor = null;
-        rebuildBatcher();
-    }
-    if (sessionFallback || apiKeyFor(configured).trim() === "") return "google";
-    return configured;
-}
+/** The one engine (0.2.9, AI only): Subline's relay, ✦. */
+const ENGINE: EngineId = "relay";
 
 /* ------------------------------------------------------- entitlement -- */
 
 /**
  * Anything paid for: Automatic or AI (see entitlement.ts). There is no free
- * tier: an install with nothing translates nothing, not even with Google, and
- * shows the activation notice instead.
+ * tier: an install with nothing translates nothing and shows the activation
+ * notice instead.
  */
 function activated(): boolean {
     return entitlementLevel() !== "none";
 }
 
 /**
- * An Automatic owner with no working ✦ tier: ≈ on everything, and five ✦
- * previews a day from ⚡. An AI install whose code was rejected this
- * session (pinned to Google) is not this: it gets its own error, never a
- * preview nudge.
+ * ✦ is on for this account now: the relay's `ai` (0.2.9: a running or not
+ * yet started period, a subscription, a buyer). Then every message and every
+ * surface goes to the relay by itself. Off, nothing translates by itself; an
+ * install with ⚡ left (isAutomaticOnly) asks for one message at a time.
+ */
+function aiOn(): boolean {
+    return entitlementLevel() === "ai";
+}
+
+/**
+ * ✦ is off, and ⚡ gives one of the day's five ✦ translations (previewPress):
+ * an Automatic code whose ✦ is not on (a period that ended, an early user's
+ * Automatic). Nothing is translated by itself.
  */
 function isAutomaticOnly(): boolean {
-    return entitlementLevel() === "automatic" && !isLlmEngine(effectiveEngine());
+    return entitlementLevel() === "automatic";
 }
 
 /** The saved Subline code, trimmed, or "". */
@@ -717,6 +678,18 @@ function savedCode(): string {
  */
 async function relayCredentials(): Promise<{ credential: string; install: string; }> {
     const install = tasteBearer(await installIdOnce());
+    const code = savedCode();
+    return { credential: code !== "" ? code : install, install };
+}
+
+/**
+ * relayCredentials without the wait: the install id this account has now,
+ * or null (then no funnel step goes out). For events.ts only.
+ */
+function eventCredentials(): { credential: string; install: string; } | null {
+    const id = knownInstallId();
+    if (id === null || id === "") return null;
+    const install = tasteBearer(id);
     const code = savedCode();
     return { credential: code !== "" ? code : install, install };
 }
@@ -903,13 +876,12 @@ async function enterAccount(account: string, again = false): Promise<void> {
     setCurrentHolder(holderFor(savedCode(), installId));
     await loadEntitlement();
     await loadLocalTasteCount();
+    // What this account was already shown about its plan, on this computer.
+    await loadPlanNotes(legacy ? PLAN_NOTES_KEY : `${PLAN_NOTES_KEY}:${account}`);
     if (epoch !== accountEpoch) return;
     tasteLog(`following the signed-in Discord account (${legacy ? "the install id from before" : "its own install id"})`);
     lastTickLevel = entitlementLevel();
-    if (fastBatcher !== null) {
-        releaseFallbackIfCredentialChanged();
-        rebuildBatcher();
-    }
+    if (running) rebuildBatcher();
     onEntitlementChanged();
     void refreshEntitlement();
     // A move started on another account waits for this one (Move my plan).
@@ -1130,6 +1102,7 @@ function showMustLinkBar(): void {
         return;
     }
     putNotice("link", LINK_COPY.mustLinkNotice, LINK_COPY.button, () => startLinkConfirmed());
+    sendEvent("link_prompt");
 }
 
 /**
@@ -1207,6 +1180,7 @@ function startLink(): void {
             if (linkBusy) return;
             // Closed without a code (Cancel, the X): what the link was for goes too.
             afterLink = null;
+            sendEvent("link_cancel");
             putLinkBarBack();
         },
         onCrash: (error, componentStack) => {
@@ -1216,7 +1190,8 @@ function startLink(): void {
             void runFallback(null, reserveFallbackTab());
         }
     });
-    if (!opened) {
+    if (opened) sendEvent("link_open");
+    else {
         // Linking is the way in for everyone: a window that cannot open is
         // logged and recorded for the feedback box, never silent, and the
         // browser takes over.
@@ -1327,6 +1302,9 @@ async function finishLink(code: string, silent = false): Promise<void> {
 async function takeLinkAnswer(
     res: Extract<Awaited<ReturnType<typeof transport.relayLink>>, { ok: true; }>, sent: string, install: string, silent: boolean
 ): Promise<void> {
+    // The Link step counts links the reader pressed for: not a silent re-link
+    // (it never showed the bar or the window) and not Move my plan.
+    if (!silent && res.moved !== true) sendEvent("link_done");
     const account = currentAccount;
     // A purchase started here before 0.2.8 and still on its way (said before
     // this answer replaces it): it was paid, so no Buy panel is pushed.
@@ -1358,7 +1336,9 @@ async function takeLinkAnswer(
     // Linked by itself, or with a purchase from before still on its way (it
     // lands with a later status): the Activate notice, never a panel nobody
     // asked for. Its Activate sells nothing twice (relay purchase_pending).
-    if (!activated() && res.moved !== true) {
+    // The plan could not be read with the link (0.2.9 accessUnknown): the
+    // status call that follows decides, never a panel before it.
+    if (!activated() && res.moved !== true && res.accessUnknown !== true) {
         if (silent || purchaseOnItsWay) showActivationNotice();
         else openUpgradeForLevel();
     }
@@ -1520,6 +1500,8 @@ async function runFallback(ticket: string | null, tab: ReservedTab | null | unde
                     await Promise.resolve(open(url));
                 }
                 toast(FALLBACK_COPY.opened, "info");
+                // Discord's authorize page is open (in the browser): the same step as the window.
+                if (ticket === null) sendEvent("link_open");
                 return true;
             },
             askPair: triesLeft => askPairCode(triesLeft),
@@ -1551,6 +1533,8 @@ async function runFallback(ticket: string | null, tab: ReservedTab | null | unde
                 break;
             case "timeout":
                 afterLink = null;
+                // The authorize page was left without a link.
+                if (ticket === null) sendEvent("link_cancel");
                 sayResult(FALLBACK_COPY.timeout, "failure");
                 break;
             case "blocked":
@@ -1559,6 +1543,7 @@ async function runFallback(ticket: string | null, tab: ReservedTab | null | unde
                 break;
             case "cancelled":
                 afterLink = null;
+                if (ticket === null) sendEvent("link_cancel");
                 break;
         }
     } catch (err) {
@@ -1916,8 +1901,10 @@ function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): vo
         // Not linked: this account may own a plan only its Link can find (it
         // removed Subline from Authorized Apps, or never approved it on this
         // Discord), so Link is the button.
-        if (linkNeeded()) putNotice("activation", fill(ACCOUNT_COPY.planElsewhereLink, { name: elsewhere }), LINK_COPY.button, linkFromSettings);
-        else putNotice("activation", fill(ACCOUNT_COPY.planElsewhere, { name: elsewhere }), ACCOUNT_COPY.ok, () => takeNotice("activation"));
+        if (linkNeeded()) {
+            putNotice("activation", fill(ACCOUNT_COPY.planElsewhereLink, { name: elsewhere }), LINK_COPY.button, linkFromSettings);
+            sendEvent("link_prompt");
+        } else putNotice("activation", fill(ACCOUNT_COPY.planElsewhere, { name: elsewhere }), ACCOUNT_COPY.ok, () => takeNotice("activation"));
         return;
     }
     // Not linked: the Link bar instead. Nothing else can help until then.
@@ -1925,6 +1912,7 @@ function showActivationNotice(message: string = UPGRADE_COPY.activateNotice): vo
     // this session (putNotice still never shows it twice).
     if (linkNeeded()) {
         putNotice("activation", LINK_COPY.notice, LINK_COPY.button, linkFromSettings, true);
+        sendEvent("link_prompt");
         return;
     }
     putNotice("activation", message, UPGRADE_COPY.activateButton, openUpgradeForLevel);
@@ -1976,6 +1964,31 @@ function showAppNotice(): void {
 }
 
 /**
+ * "Subline updated, restart Discord" (updateNotice.ts). Restart stays the one
+ * button; "What's new" is an inline link, as "Later" is above, to the release
+ * page of the version on disk. It does not take the notice down: the restart
+ * is still due. No version we can name, no link.
+ */
+function showUpdateNotice(version: string | null): void {
+    const url = releaseNotesUrl(version);
+    const display = url === null ? UPDATE_NOTICE_COPY.text : (
+        <span>
+            {UPDATE_NOTICE_COPY.text}{" "}
+            <a
+                role="button"
+                onClick={() => {
+                    if (isReleaseNotesUrl(url)) (globalThis as any).VencordNative?.native?.openExternal?.(url);
+                }}
+                style={{ marginLeft: 6, textDecoration: "underline", cursor: "pointer", color: "inherit" }}
+            >
+                {UPDATE_NOTICE_COPY.whatsNew}
+            </a>
+        </span>
+    );
+    showNotice(display as Parameters<typeof showNotice>[0], UPDATE_NOTICE_COPY.button, relaunch);
+}
+
+/**
  * The entitlement changed under a running session. Take the activation
  * notice down (or put it up), rebuild so the quality tier appears or goes,
  * redraw what is on screen, and translate the open channel if this install
@@ -1986,7 +1999,10 @@ function onEntitlementChanged(): void {
     showMustLinkBar();
     if (activated()) takeNotice("activation");
     if (activated()) takeDownCheckingNotice();
-    if (fastBatcher === null) return;   // stopped
+    if (!running) return;   // stopped
+    // The relay answered about the plan: a refusal hold from before it says
+    // nothing any more (a payment that landed must not wait a minute).
+    planHeldUntil = 0;
     // Not while a relay answer is being taken in (a dead code is dropped
     // before the account's answer is stored), and not while a saved code
     // waits for the relay: the answer itself decides which notice is right.
@@ -2019,25 +2035,14 @@ function normaliseTargetLangSetting(): void {
 }
 
 /**
- * The engine follows the code, and the settings page no longer shows it, so a
- * stored value from an older build can strand an install: "relay" with no
- * code, or a bring-your-own-key engine with no key (v0.1.8 and earlier). Those
- * would fall back to Google anyway, but with a red "no key set" toast the
- * reader can do nothing about. Once, at start: a code means the relay, and no
- * code means Google. An LLM engine that does have its own key is left alone
- * (not offered in shipped builds, but the engine code and its tests remain).
+ * The settings page does not show the engine, and 0.2.9 has one (the relay,
+ * spec decision 1), so a value an older build stored ("google", or a
+ * bring-your-own-key engine from v0.1.8 and earlier) is moved to the relay
+ * here, at start and on every account switch. No old setting can select an
+ * engine this build does not run.
  */
 function normaliseEngineSetting(): void {
-    const raw = settings.store.sublineCode;
-    const code = typeof raw === "string" ? raw.trim() : "";
-    const engine = settings.store.engine as EngineId;
-    if (code !== "") {
-        if (engine !== "relay") settings.store.engine = "relay";
-        return;
-    }
-    if (engine === "google") return;
-    if (engine !== "relay" && isLlmEngine(engine) && apiKeyFor(engine).trim() !== "") return;
-    settings.store.engine = "google";
+    if (settings.store.engine !== ENGINE) settings.store.engine = ENGINE;
 }
 
 /**
@@ -2057,7 +2062,7 @@ function onTargetLangMaybeChanged(): void {
         if (k.startsWith(`${prev}\u0000`)) qualityPhrases.delete(k);
     }
     queueMicrotask(() => {
-        if (fastBatcher === null) return;
+        if (!running) return;
         const open = SelectedChannelStore.getChannelId();
         if (open) catchUp(open);
     });
@@ -2119,23 +2124,27 @@ function getCheckoutFlow(): CheckoutFlow {
 function onPaymentPendingChange(pending: boolean): void {
     setPaymentPending(pending);
     if (pending) {
-        closePanel("addAi");
-        closePanel("activate");
+        closePanel("plan");
+        closePanel("ended");
     } else {
-        closePanel("pending");
+        closePanel("planInfo");
     }
     notifyForcedInFlight();
 }
 
 /**
  * P5. What the install owns changed: a panel selling what it now has closes
- * (Add AI once AI is on; Activate once it is activated). The plan card, ⚡
- * and the ✦ preview line already read the level on every draw.
+ * (the plan panel and the ended panel once a subscription is here; also
+ * once a payment is on its way, P4). A panel opened during a period stays:
+ * a period still sells. The ✦ button, the plan card and ⚡ already read the
+ * plan on every draw.
  */
 function closePanelsForLevel(): void {
-    const level = entitlementLevel();
-    if (level === "ai") closePanel("addAi");
-    if (level !== "none") closePanel("activate");
+    const state = currentPlanView().state;
+    if (state === "subscribed" || state === "pending") {
+        closePanel("plan");
+        closePanel("ended");
+    }
 }
 let unsubscribePanels: (() => void) | null = null;
 
@@ -2279,6 +2288,17 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof transport.relayStatu
     // lowers nothing is taken (the code itself still waits): the first dead
     // sighting can be the link answer itself, and holding the stored "not
     // linked, nothing owned" kept a paying reader on the Link bar for an hour.
+    // 0.2.9, a link or move answer: the link stands, but the relay could not
+    // read the plan (`accessUnknown`, no ai, previews, access or token in it).
+    // The last state stays (decision 16): only the link is news. The relay
+    // is asked again for the plan.
+    if (res.accessUnknown === true) {
+        const e = getEntitlement();
+        if (e !== null && typeof res.linked === "boolean" && e.linked !== res.linked) setEntitlement({ ...e, linked: res.linked });
+        void refreshEntitlement();
+        if (res.grant === "early") earlyGrantPending = true;
+        return saved || dropped;
+    }
     const answerLevel: Level = res.ai === true ? "ai" : res.automatic === true ? "automatic" : "none";
     const holdStored = deadPending && levelRank(answerLevel) < levelRank(entitlementLevel());
     if (typeof res.automatic === "boolean" && !holdStored) {
@@ -2289,6 +2309,8 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof transport.relayStatu
         // local clock by the difference the relay's `now` reveals.
         const skew = res.serverNow !== undefined ? res.serverNow - now : 0;
         const holder = currentHolderNow();
+        // 0.2.9: the plan state, its times on the local clock too.
+        const access = accessOnLocalClock(res.access, skew);
         setEntitlement({
             automatic: res.automatic,
             ai: res.ai === true,
@@ -2301,13 +2323,34 @@ function applyStatus(res: Extract<Awaited<ReturnType<typeof transport.relayStatu
             // A prior payer still to link (0.2.8): its plan works; the bar asks.
             ...(res.mustLink === true && res.linked === false ? { mustLink: true } : {}),
             // A purchase started here before 0.2.8, still on its way: a link asks the confirm.
-            ...(res.pendingPurchase === true && res.linked === false ? { pendingPurchase: true } : {})
+            ...(res.pendingPurchase === true && res.linked === false ? { pendingPurchase: true } : {}),
+            ...(access !== null ? { access } : {})
         });
         noteRelayClock(res.serverNow, now);
         if (res.previews !== undefined) recordTasteQuota(res.previews.used, res.previews.cap);
     }
     if (res.grant === "early") earlyGrantPending = true;
     return saved || dropped;
+}
+
+/**
+ * A stated `access` with its times moved onto the local clock (see CLOCK SKEW
+ * in applyStatus), or null when there is none or it is malformed.
+ *
+ * `startedAt` stays on the relay's clock: it is only the period's id
+ * (planState.ts periodIdOf). The skew is measured after the answer arrives,
+ * so it differs a little on every answer; a moved start would give the same
+ * period a new id each time, and its two messages would come again.
+ */
+function accessOnLocalClock(raw: unknown, skew: number) {
+    const a = accessFrom(raw);
+    if (a === null) return null;
+    const move = (t: number | undefined) => t === undefined ? undefined : t - skew;
+    return {
+        ...a,
+        ...(a.endsAt !== undefined ? { endsAt: move(a.endsAt) } : {}),
+        ...(a.resetsAt !== undefined ? { resetsAt: move(a.resetsAt) } : {})
+    };
 }
 
 /** The relay just granted the early-user Automatic: the next announcement says so. */
@@ -2385,32 +2428,53 @@ function openUpgradeFor(asked: boolean): void {
         showDeviceLimitNotice(true);
         return;
     }
-    // P4: a payment is on its way. Say so, and sell nothing twice.
-    if (level !== "ai" && isPaymentPending()) {
-        openPaymentPendingPanel();
-        return;
-    }
-    // Not known yet whether this account is linked (a first 0.2.8 start the
-    // relay has not answered, an answer from 0.2.7, a code just changed):
-    // ask the relay first. Its answer puts up the Link (not linked) or the
-    // account confirm (a plan from before) instead of a sale, which could
-    // otherwise reach the installer's id every local account shares
-    // (checkout.ts header).
-    if (!asked && level !== "ai" && linkState() === "unknown") {
+    const view = currentPlanView();
+    // Not known yet whether this account is linked (a first start the relay
+    // has not answered, a code just changed): ask the relay first. Its answer
+    // puts up the Link (not linked) or the account confirm (a plan from
+    // before) instead of a sale, which could otherwise reach the installer's
+    // id every local account shares (checkout.ts header).
+    if (!asked && view.state !== "subscribed" && view.state !== "pending" && linkState() === "unknown") {
         void askThenOpenUpgrade();
         return;
     }
-    // Every purchase names the account first (withAccountConfirm), inside the
+    // THE PLAN PANEL (0.2.9 spec, decisions 11 and 15): the state, and
+    // "Enter a code" at every level. Nothing to sell for a subscription or a
+    // buyer, and P4: nothing sold twice while a payment is on its way. Every
+    // purchase names the account first (withAccountConfirm), inside the
     // click, so a browser tab can still open for the checkout.
-    if (level === "none") {
-        openActivatePanel({
-            buy: () => withAccountConfirm(() => startCheckout("automatic")),
-            enterCode: openCodeEntryPanel,
-            elsewhere: () => payElsewhereConfirmed("automatic")
-        });
-    } else if (level === "automatic") {
-        openUpgradePanel(plan => withAccountConfirm(() => startCheckout(plan)), () => payElsewhereConfirmed(null));
+    if (view.state === "subscribed") {
+        // Nothing to buy and no code to enter: a code adds nothing to a paid plan.
+        openPlanPanel({ state: PLAN_COPY.onPanel });
+        return;
     }
+    if (view.state === "pending") {
+        openPlanPanel({ state: view.hover, note: UPGRADE_COPY.purchasePending, enterCode: openCodeEntryOrLink });
+        return;
+    }
+    openPlanPanel({
+        state: view.hover,
+        subscribe: plan => withAccountConfirm(() => startCheckout(plan)),
+        enterCode: openCodeEntryOrLink,
+        elsewhere: () => payElsewhereConfirmed(null)
+    });
+    // The prices, in front of a linked account with nothing yet.
+    if (priceSeenApplies({ linkState: linkState(), level, code: savedCode() })) sendEvent("price_seen");
+}
+
+/**
+ * WHAT THE ✦ BUTTON SAYS now (planState.ts): from the relay's last answer for
+ * this account, the local clock, the Link state and a checkout opened here.
+ * The ✦ button, the plan panel, ⚡ and the once-a-period messages all read it.
+ */
+function currentPlanView(now: number = Date.now()): PlanView {
+    return planView({
+        entitlement: getEntitlement(),
+        level: entitlementLevel(now),
+        now,
+        linkNeeded: linkNeeded(),
+        paymentPending: isPaymentPending()
+    });
 }
 
 /** True while openUpgradeForLevel waits for the relay (a second press asks nothing more). */
@@ -2451,9 +2515,9 @@ function sayCheckoutResult(plan: Plan, result: true | false | string): void {
     {
         if (result === true) {
             toast(UPGRADE_COPY.checkoutOpenedToast, "info");
-        } else if (result === "automatic_required") {
-            sayResult(UPGRADE_COPY.aiNeedsAutomatic, "failure");
-        } else if (result === "unavailable") {
+        } else if (result === "unavailable" || result === "automatic_required") {
+            // automatic_required: a relay from before 0.2.9 (AI only on top of
+            // Automatic, which is not sold any more). Nothing opened.
             sayResult(UPGRADE_COPY.checkoutUnavailable, "failure");
         } else if (result === "unreachable") {
             // The relay could not be reached, and the static link may not
@@ -2464,8 +2528,7 @@ function sayCheckoutResult(plan: Plan, result: true | false | string): void {
             sayResult(UPGRADE_COPY.checkoutBlocked, "failure");
         } else if (result === "already_owned") {
             // Nothing opened. AI owned means a second subscription was refused.
-            const message = plan === "automatic" ? UPGRADE_COPY.alreadyAutomatic : UPGRADE_COPY.alreadyAi;
-            sayResult(message, "info");
+            sayResult(UPGRADE_COPY.alreadyAi, "info");
             void refreshEntitlement();
         } else if (result === "purchase_pending") {
             // Nothing opened: buying again would charge twice. The flow keeps
@@ -2726,6 +2789,8 @@ function entitlementTick(now: number = Date.now()): void {
         due = true;
     }
     if (due) void refreshEntitlement();
+    // The last day can begin, and a period end, with no answer at all.
+    checkPlanMessages("change");
 }
 
 /** Back online, or Discord back in focus: ask again, at most every 10 minutes. */
@@ -2853,6 +2918,7 @@ async function refreshEntitlement(): Promise<boolean> {
         if (session === statusSession) await showUnreachableNotice(await priorUseHint(settings.store.freeTrialStartedAt).catch(() => false));
     }
     if (!answered && session === statusSession) scheduleStatusRetry();
+    if (session === statusSession) checkPlanAtStart();
     return answered;
 }
 
@@ -2904,6 +2970,10 @@ function takeStatusAnswer(res: Extract<Awaited<ReturnType<typeof transport.relay
     // code (the account's Automatic one), and that reader must not be
     // told they are on.
     if ((saved && levelRank(entitlementLevel()) > levelRank(before)) || res.grant === "early") announcePurchase();
+    // The hidden daily ceiling, as the status says it: the same one notice
+    // as a refused translation (decision 5), never a number.
+    if (aiOn() && getEntitlement()?.access?.paused === true) showPausedNotice();
+    checkPlanMessages("change");
     tasteLog(`the relay says: ${entitlementLevel()}, ${linkState()}`);
 }
 
@@ -2949,130 +3019,15 @@ function isCoolingDown(engine: EngineId): boolean {
     return Date.now() < cooldownUntil(engine);
 }
 
-/** "45s" / "2m" — deliberately coarse; this is a toast, not a countdown. */
-function formatDuration(ms: number): string {
-    if (ms < 60_000) return `${Math.max(1, Math.round(ms / 1000))}s`;
-    return `${Math.max(1, Math.round(ms / 60_000))}m`;
-}
-
 /**
- * "0:45" / "1:05" — a live countdown, unlike `formatDuration()`'s one-shot
- * toast wording. The quota indicator (see `QuotaIndicator` below) ticks once
- * a second while mounted, so this has to read as counting DOWN rather than
- * as a coarse "about how long" estimate.
+ * "0:45" / "1:05" — a live countdown in the ⚡ label, so this has to read as
+ * counting DOWN rather than as a coarse "about how long" estimate.
  */
 function formatCountdown(ms: number): string {
     const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
     return `${minutes}:${String(seconds).padStart(2, "0")}`;
-}
-
-/**
- * The last thing the PROVIDER itself said about our remaining allowance, for
- * the engine that said it.
- *
- * THE DEFECT THIS EXISTS FOR: the `✦ N` indicator used to show our own token
- * bucket and nothing else, so it could read `✦ 3` while the provider was
- * refusing instantly — the user clicks ⚡ on the strength of a number the
- * provider never agreed to and gets an immediate 429. Only an OpenAI-compatible
- * engine (Groq) reports this at all; Gemini and Claude say nothing on a
- * success, and for them everything below simply never fires.
- *
- * Not a Map keyed by engine: exactly one engine is ever configured at a time,
- * so a second entry could only ever be a stale reading for an engine nobody is
- * using — and `engine` is recorded here precisely so that a reading taken
- * before the user switched engines is discarded rather than shown against the
- * new one.
- */
-interface ProviderQuotaReading {
-    engine: LlmEngineId;
-    remaining: number;
-    /** When this was read, for the staleness check below. */
-    observedAt: number;
-    /** When the provider's window rolls over, if it said. */
-    resetAt: number | null;
-}
-
-let providerQuota: ProviderQuotaReading | null = null;
-
-/**
- * How long a provider reading is worth showing when the provider named no
- * reset time.
- *
- * A remaining count is a snapshot: it goes out of date as the window rolls and
- * as anything else on the same key spends. Sixty seconds is the shortest
- * window any of these providers rate-limits over, so a reading older than that
- * cannot still be describing the window it was taken in.
- */
-const PROVIDER_QUOTA_MAX_AGE_MS = 60_000;
-
-/**
- * Record what a successful response reported. Every field is re-validated
- * here rather than trusted: this arrives from a remote header, through IPC,
- * and a NaN or a negative would otherwise reach the indicator as a number the
- * user is asked to make a decision on.
- */
-function recordProviderQuota(engine: LlmEngineId, reported: unknown): void {
-    if (reported === null || typeof reported !== "object") return;
-    const { remainingRequests, resetRequestsMs } = reported as {
-        remainingRequests?: unknown;
-        resetRequestsMs?: unknown;
-    };
-    // A reading with no remaining count says nothing this can use. Zero IS a
-    // usable count — it is the single most important thing the provider can
-    // tell us — so the guard is on type and sign, never on truthiness.
-    if (typeof remainingRequests !== "number" || !Number.isFinite(remainingRequests)) return;
-    if (remainingRequests < 0) return;
-
-    const now = Date.now();
-    const resetMs = typeof resetRequestsMs === "number"
-        && Number.isFinite(resetRequestsMs)
-        && resetRequestsMs > 0
-        ? resetRequestsMs
-        : null;
-
-    providerQuota = {
-        engine,
-        remaining: remainingRequests,
-        observedAt: now,
-        resetAt: resetMs === null ? null : now + resetMs
-    };
-}
-
-/**
- * The provider's own remaining count for this engine, if we have one worth
- * believing — otherwise undefined, which is the state Gemini and Claude are
- * permanently in.
- *
- * "Worth believing" is deliberately conservative, because a stale number here
- * is worse than no number: it is a confident wrong answer in a place the user
- * reads to decide whether to spend. So it must be for THIS engine, taken
- * recently, and from a window that has not since rolled over — once the
- * provider's window resets, the count we hold is a floor the provider has
- * already moved past, and showing it would understate what is available.
- *
- * `resetInMs` rides alongside `remaining` because a `remaining` of zero is
- * shown as a WAIT, not a bare zero (see `describeQuotaState`), and a wait
- * needs a duration. When the provider stated a real reset time that duration
- * IS the window closing. When it did not, the most honest duration this
- * function can offer is how much longer THIS READING stays trusted at all —
- * the distrust cutoff below — because past that point the reading is
- * discarded anyway and whatever the gate itself says takes over.
- */
-function providerRemainingFor(
-    engine: LlmEngineId
-): { remaining: number; resetInMs: number } | undefined {
-    const reading = providerQuota;
-    if (reading === null || reading.engine !== engine) return undefined;
-    const now = Date.now();
-    if (reading.resetAt !== null) {
-        if (now >= reading.resetAt) return undefined;
-        return { remaining: reading.remaining, resetInMs: reading.resetAt - now };
-    }
-    const age = now - reading.observedAt;
-    if (age > PROVIDER_QUOTA_MAX_AGE_MS) return undefined;
-    return { remaining: reading.remaining, resetInMs: PROVIDER_QUOTA_MAX_AGE_MS - age };
 }
 
 /**
@@ -3096,48 +3051,20 @@ function providerRemainingFor(
  * ever asked), and "ready" would tell the user ⚡ works when clicking it would
  * actually do nothing.
  *
- * TWO LIMITS, AND READY REQUIRES CLEARING BOTH. `rateGateAvailable()` is a
- * PURE read of the gate this engine's requests actually go through. For an
- * engine that DOES report its own remaining count (see `providerRemainingFor`)
- * both limits are real and a request has to clear both, so readiness is
- * `gate > 0 && provider > 0`. That is what fixes the original defect: at gate
- * 3, provider 0, this now reports "not ready" — the truth — instead of a
- * count that implied otherwise. When no provider figure is known, only the
- * gate's answer matters, and the previous behaviour is untouched by
- * construction.
- *
- * `source` (only present when not ready, and not cooling) says WHICH limit is
- * binding, so the wait shown is the right one: the provider's own reset time
- * when the provider's figure is what is holding things up, the gate's own
- * refill wait otherwise. Ties go to `provider` only when its figure is the
- * smaller or equal one, because that is when it is the number actually doing
- * the work.
+ * Otherwise readiness is the rate gate's: `rateGateAvailable()` is a PURE
+ * read of the gate the relay's requests actually go through. (A provider's
+ * own remaining count was a second limit for the bring-your-own-key Groq
+ * engine; the relay reports none.)
  */
 function describeQuotaState(
-    engine: LlmEngineId
+    engine: EngineId
 ): { cooling: true; remainingMs: number }
     | { cooling: false; ready: true }
-    | { cooling: false; ready: false; remainingMs: number; source: "gate" | "provider" } {
+    | { cooling: false; ready: false; remainingMs: number } {
     const remainingMs = cooldownUntil(engine) - Date.now();
     if (remainingMs > 0) return { cooling: true, remainingMs };
-
-    const gate = rateGateAvailable();
-    const provider = providerRemainingFor(engine);
-
-    if (provider === undefined) {
-        if (gate > 0) return { cooling: false, ready: true };
-        return { cooling: false, ready: false, remainingMs: rateGateWaitMs(), source: "gate" };
-    }
-
-    if (Math.min(gate, provider.remaining) > 0) return { cooling: false, ready: true };
-
-    const bindingIsProvider = provider.remaining <= gate;
-    return {
-        cooling: false,
-        ready: false,
-        remainingMs: bindingIsProvider ? provider.resetInMs : rateGateWaitMs(),
-        source: bindingIsProvider ? "provider" : "gate"
-    };
+    if (rateGateAvailable() > 0) return { cooling: false, ready: true };
+    return { cooling: false, ready: false, remainingMs: rateGateWaitMs() };
 }
 
 /**
@@ -3152,18 +3079,15 @@ function describeQuotaState(
  *     rather than a padded guess. It is floored at the gate's refill interval
  *     (see below): the API's sub-second hint frees exactly one slot, which is
  *     not enough to be worth waking up for.
- *  3. The user is told, at most once per session.
+ *  3. The user is told, at most once per session, when the wait is long.
  *
- * The batch that triggered this is NOT lost, and nothing has to re-send it:
- * the fast tier already translated these same messages through Google before
- * the LLM was ever asked. A rate-limited quality tier costs the reader
- * nothing but the upgrade.
+ * The batch that triggered this is NOT lost: runTier marks its messages ⏳
+ * and the channel's retry asks again just after the cooldown ends.
  */
 function enterCooldown(
-    engine: LlmEngineId,
+    engine: EngineId,
     retryAfterMs: number | undefined,
     quotaLimitPerMinute: number | undefined,
-    quotaModel?: string,
     // The engine's own error text, ONLY so the announcement can tell the
     // relay's daily allowance apart from an ordinary minute of throttling:
     // they arrive as the same 429 and have opposite remedies (wait / come back
@@ -3196,7 +3120,7 @@ function enterCooldown(
     const cooldownMs = Math.max(asked, rateGateSettings().refillMs);
     setCooldown(engine, Date.now() + cooldownMs);
 
-    announceCooldownOnce(engine, cooldownMs, quotaModel, isDailyLimit(errorText), isMonthlyLimit(errorText));
+    announceCooldownOnce(cooldownMs, isDailyLimit(errorText), isMonthlyLimit(errorText));
 }
 
 /**
@@ -3222,65 +3146,203 @@ function isMonthlyLimit(errorText: string | undefined): boolean {
  * A 429 used to raise a RED toast saying "rate limited" for what is usually a
  * few seconds of waiting. Red means broken; ordinary users read it as the
  * plugin dying, on a pause that resolves itself before they finish reading the
- * sentence. Three cases, told apart by how long the wait really is and by what
- * the server said:
+ * sentence. So:
  *
- *  - 60 SECONDS OR LESS: SILENT. Nothing is wrong and nothing is lost. The ≈
- *    line is already on screen (the fast tier answered before the LLM was ever
- *    asked) and ✦ resumes by itself. The quota indicator shows the countdown
- *    for anybody who wants it — see QuotaIndicator.
- *  - LONGER: one NEUTRAL note, saying how long and that reading continues. Long
- *    enough to be noticed, so it is worth a sentence; still not a failure.
- *  - THE DAY'S ALLOWANCE GONE (relay 429, "daily limit reached"): waiting is
- *    not the remedy, so the wording says tomorrow rather than a duration.
+ *  - THE RELAY BUSY (a per-minute 429, however long): SILENT. It is not the
+ *    reader's to act on. The messages wear ⏳, ✦ resumes by itself, and the
+ *    ⚡ label counts down for anybody who wants it.
+ *  - THE DAY'S OR THE MONTH'S ALLOWANCE GONE (relay 429, "daily limit
+ *    reached" / "monthly limit reached"): waiting a few seconds is not the
+ *    remedy, so one neutral note says when ✦ is back.
+ *  - The hidden daily ceiling (429 ai_paused) has its own notice, see
+ *    showPausedNotice.
  *
- * A MODEL NAMED ("Quota exceeded for metric: ..., model: <name>") is the one
- * case that stays a red failure, and deliberately: the quota belongs to THAT
- * MODEL, and on a free-tier key a model with no allowance returns 429 on the
- * first request of a session and on every request after it. Waiting changes
- * nothing, the ✦ upgrade never arrives, and the only fix is a setting. Days
- * were lost reading exactly that as throttling. See `geminiModel` in
- * settings.ts.
- *
- * Whatever is shown is shown ONCE per session, the same discipline as
- * announceMissingKeyOnce(): a catch-up storm can enter cooldown on several
- * batches in a row, and a toast per batch would be worse than the problem it
- * describes. A silent cooldown does not spend that one chance — it is not an
- * announcement, so a genuinely long pause later still gets its note.
+ * Whatever is shown is shown ONCE per session: a catch-up storm can enter
+ * cooldown on several batches in a row, and a toast per batch would be worse
+ * than the problem it describes.
  */
-const QUIET_COOLDOWN_MS = 60_000;
-
-function announceCooldownOnce(
-    engine: LlmEngineId, cooldownMs: number, quotaModel?: string, dailyLimit = false, monthlyLimit = false
-): void {
-    const { label } = LLM_ENGINES[engine];
-
-    let type: ToastKind = "info";
+function announceCooldownOnce(_cooldownMs: number, dailyLimit = false, monthlyLimit = false): void {
     let message: string;
-
-    if (typeof quotaModel === "string" && quotaModel !== "") {
-        type = "failure";
-        message = `${label} model "${quotaModel}" is over its quota. It may not be available `
-            + "on your key. Pick another model in settings. Using Google (≈) meanwhile.";
-    } else if (dailyLimit) {
-        message = "Today's ✦ allowance is used up. ≈ keeps working. ✦ is back tomorrow.";
-    } else if (monthlyLimit) {
-        message = "This month's ✦ allowance is used up. ≈ keeps working. ✦ is back next month.";
-    } else if (cooldownMs <= QUIET_COOLDOWN_MS) {
-        // Say nothing, and stay unannounced: this is the common case, and it is
-        // over before a toast would have finished fading in.
-        return;
-    } else if (engine === "relay") {
-        // P9: Subline's own relay busy or down is not the reader's to act on.
-        // ≈ is on screen, ✦ resumes by itself, and the chat bar counts down.
-        return;
-    } else {
-        message = `✦ is catching up. Back in about ${formatDuration(cooldownMs)}. ≈ keeps working.`;
-    }
+    if (dailyLimit) message = "Today's ✦ translations are used up. ✦ is back tomorrow.";
+    else if (monthlyLimit) message = "This month's ✦ translations are used up. ✦ is back next month.";
+    // P9: Subline's own relay busy is not the reader's to act on.
+    else return;
 
     if (announcedCooldown) return;
     announcedCooldown = true;
-    toast(message, type);
+    toast(message, "info");
+}
+
+/**
+ * THE HIDDEN DAILY CEILING (0.2.9, spec decision 5). The relay answered 429
+ * ai_paused: this account's ✦ for today is spent (or no new period may start
+ * from this address today). One plain notice says so, never a number, never
+ * silent, and at most once a UTC day: the relay is not asked again until its
+ * wait (UTC midnight) is over, so nothing repeats it meanwhile.
+ */
+let pausedNoticeDay = "";
+
+function showPausedNotice(): void {
+    const day = new Date().toISOString().slice(0, 10);
+    if (pausedNoticeDay === day) return;
+    pausedNoticeDay = day;
+    putNotice("paused", UPGRADE_COPY.aiPaused, UPGRADE_COPY.aiPausedButton, () => takeNotice("paused"));
+}
+
+/* ------------------------------------------------- the plan messages -- */
+
+/*
+ * ONLY TWO MESSAGES PER PERIOD, EACH ONCE (0.2.9 spec, decision 12), and the
+ * update panel once (decision 13). planState.ts decides what is due; this is
+ * when, and the memory of what was shown:
+ *
+ *  - the last-day notice ("Your AI translation ends tomorrow." Subscribe /
+ *    Later): a notice, whenever the plan is looked at (a relay answer, the
+ *    minute tick, a channel switch);
+ *  - the ended panel: a window, so only at a channel switch or the start
+ *    (the first relay answer of the session, or its failure: by the clock a
+ *    period that ended while Discord was closed is ended offline too), and
+ *    never while the reader is typing (then it waits for the next switch);
+ *  - the update panel: a window, once per computer, at the first start of
+ *    0.2.9 whose answer says which of the four texts is true.
+ *
+ * What was shown is kept per computer and per Discord account (by period),
+ * so two computers each show it once, and a second account on this computer
+ * has its own. None of it depends on the ✦ button being on screen.
+ */
+export const PLAN_NOTES_KEY = "VcTranslate_planNotes";
+export const UPDATE_PANEL_KEY = "VcTranslate_updatePanel029";
+/** A key pressed this recently in a text field is typing: no window then. */
+const TYPING_MS = 3_000;
+
+let planNotes: PlanNotes = emptyNotes();
+/** Where this account's notes are stored, once read (null: not read yet, nothing is shown). */
+let planNotesKey: string | null = null;
+/** The read asked for last (an account switch during a read wins). */
+let planNotesWanted: string | null = null;
+/** Whether the update panel was shown on this computer; null until read. */
+let updatePanelShown: boolean | null = null;
+/** The session's first look at the plan (the "next start") has happened. */
+let planStartChecked = false;
+/** Between start() and stop(): the plan messages may show. */
+let planMessagesOn = false;
+let lastKeyAt = 0;
+let keyListener: ((e: unknown) => void) | null = null;
+
+async function loadPlanNotes(key: string): Promise<void> {
+    planNotesWanted = key;
+    planNotesKey = null;
+    let read: PlanNotes;
+    try {
+        read = notesFrom(await DataStore.get<unknown>(key));
+    } catch {
+        read = emptyNotes();
+    }
+    if (planNotesWanted !== key) return;
+    planNotes = read;
+    planNotesKey = key;
+}
+
+function notePlan(which: keyof PlanNotes, id: string): void {
+    const key = planNotesKey;
+    if (key === null) return;
+    planNotes = withNote(planNotes, which, id);
+    void DataStore.set(key, planNotes).catch(() => { });
+}
+
+/** The reader is typing in a text field right now (a key in the last 3 s, with the focus in one). */
+function typingNow(): boolean {
+    if (Date.now() - lastKeyAt >= TYPING_MS) return false;
+    try {
+        const el = (globalThis as any).document?.activeElement as { tagName?: string; isContentEditable?: boolean; } | null | undefined;
+        if (!el) return false;
+        return el.isContentEditable === true || el.tagName === "TEXTAREA" || el.tagName === "INPUT";
+    } catch {
+        return false;
+    }
+}
+
+function listenForTyping(on: boolean): void {
+    try {
+        const doc = (globalThis as any).document;
+        if (typeof doc?.addEventListener !== "function") return;
+        if (keyListener !== null) doc.removeEventListener("keydown", keyListener, true);
+        keyListener = null;
+        if (!on) return;
+        keyListener = () => { lastKeyAt = Date.now(); };
+        doc.addEventListener("keydown", keyListener, true);
+    } catch { /* no typing guard: the windows still come only at a switch or the start */ }
+}
+
+/** "Your AI translation ends tomorrow." with Subscribe, and "Later" inline (a notice has one button). */
+function showLastDayNotice(): void {
+    const later = () => takeNotice("plan");
+    const display = (
+        <span>
+            {PLAN_COPY.lastDay}{" "}
+            <a
+                role="button"
+                onClick={later}
+                style={{ marginLeft: 6, textDecoration: "underline", cursor: "pointer", color: "inherit" }}
+            >
+                {PLAN_COPY.later}
+            </a>
+        </span>
+    );
+    putNotice("plan", PLAN_COPY.lastDay, PLAN_COPY.subscribe, () => {
+        takeNotice("plan");
+        openUpgradeForLevel();
+    }, false, display);
+}
+
+function openWhatsNew(): void {
+    (globalThis as any).VencordNative?.native?.openExternal?.(WHATS_NEW_URL);
+}
+
+/** The update panel, if it is due and its text is known. True when it opened. */
+function maybeShowUpdatePanel(): boolean {
+    if (updatePanelShown !== false) return false;
+    // ✦ on for this account and this code: the answer is about this reader.
+    if (entitlementLevel() !== "ai") return false;
+    const text = updateTextFor(getEntitlement()?.access);
+    if (text === null) return false;
+    if (!openUpdatePanel(text, openWhatsNew)) return false;
+    updatePanelShown = true;
+    void DataStore.set(UPDATE_PANEL_KEY, true).catch(() => { });
+    return true;
+}
+
+/**
+ * Look at the plan and show what is due (see above). `trigger`: "start"
+ * (the session's first look), "switch" (a channel switch) or "change" (a
+ * relay answer, the minute tick). Never throws.
+ */
+function checkPlanMessages(trigger: "start" | "switch" | "change"): void {
+    if (!planMessagesOn || planNotesKey === null) return;
+    try {
+        const view = currentPlanView();
+        // The last-day notice is about a running period: gone once it is not.
+        if (view.state !== "period") takeNotice("plan");
+        if (lastDayDue(view, planNotes)) {
+            notePlan("lastDay", view.periodId!);
+            showLastDayNotice();
+        }
+        if (typingNow()) return;
+        if (maybeShowUpdatePanel()) return;
+        if ((trigger === "start" || trigger === "switch") && endedDue(view, planNotes)) {
+            const opened = openEndedPanel(view.periodDays ?? NEW_DAYS_FALLBACK, plan => withAccountConfirm(() => startCheckout(plan)));
+            if (opened) notePlan("ended", view.periodId!);
+        }
+    } catch (e) {
+        logger.warn(`the plan messages failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+}
+
+/** The session's first look at the plan, once (after the first relay answer, or its failure). */
+function checkPlanAtStart(): void {
+    if (planStartChecked || !planMessagesOn || planNotesKey === null) return;
+    planStartChecked = true;
+    checkPlanMessages("start");
 }
 
 /**
@@ -3325,7 +3387,7 @@ function coveredByGlobalAuto(channelId: string): boolean {
 }
 
 function channelActive(channelId: string): boolean {
-    // Nothing paid for: no channel translates, not even with Google.
+    // Nothing paid for: no channel translates.
     if (!activated()) return false;
     // A covered server channel is on unless the user switched it off here.
     if (coveredByGlobalAuto(channelId)) return !isChannelDisabled(channelId);
@@ -3333,96 +3395,11 @@ function channelActive(channelId: string): boolean {
     return isChannelEnabled(channelId);
 }
 
-/** Identifies the credential a pin applies to. Never logged, never displayed. */
-function credentialFingerprint(): string {
-    const configured = settings.store.engine as EngineId;
-    // Google has no credential (and no LLM_ENGINES row to read one from).
-    return `${configured}:${isLlmEngine(configured) ? apiKeyFor(configured).trim() : ""}`;
-}
-
-/**
- * Lift the pin when the credential it was set against is no longer configured.
- *
- * Called from the settings subscriber. Deliberately NOT "clear on any settings
- * change": that would re-arm the rejected key every time an unrelated field was
- * touched, and put the plugin back to retrying a known-bad key on every batch.
- */
-function releaseFallbackIfCredentialChanged(): void {
-    if (!sessionFallback) return;
-    if (credentialFingerprint() === fallbackPinnedFor) return;
-    sessionFallback = false;
-    fallbackPinnedFor = null;
-    fallbackExpiresAt = null;
-}
-
-type FallbackKind = "key" | "blocked";
-
-/**
- * How long a NETWORK block pins the quality tier before it is retried.
- *
- * A rejected key is a fact about the credential: it will still be wrong in an
- * hour, so retrying it every batch is pure noise and the pin lasts the session.
- * A 403 is a fact about the connection — a VPN, an ISB, a region — and those
- * come back. Pinning until restart meant a block on one day left the tier off
- * for as long as Discord stayed open: a real session ran three days past a
- * network hiccup that had cleared within the hour, showing "✦ blocked" the
- * whole time while Groq was reachable.
- *
- * Long enough that a persistent block is not retried every batch, short enough
- * that nobody has to restart Discord to recover from a transient one.
- */
-const BLOCKED_RETRY_AFTER_MS = 15 * 60_000;
-
-/** When a `blocked` pin stops applying. Null when the pin is not time-based. */
-let fallbackExpiresAt: number | null = null;
-
-function fallBackToGoogle(reason: string, kind: FallbackKind = "key") {
-    if (sessionFallback) return;   // only announce once
-    sessionFallback = true;
-    fallbackKind = kind;
-    fallbackExpiresAt = kind === "blocked" ? Date.now() + BLOCKED_RETRY_AFTER_MS : null;
-    fallbackPinnedFor = credentialFingerprint();
-    // P9: the relay blocked on this network is quiet. ≈ keeps working, the
-    // chat bar says "✦ blocked", and the pin lifts by itself (BLOCKED_RETRY_AFTER_MS).
-    if (kind === "blocked" && settings.store.engine === "relay") {
-        logger.info(`${reason}; ✦ paused for ${Math.round(BLOCKED_RETRY_AFTER_MS / 60_000)} minutes`);
-    } else {
-        toast(`${sentenceCase(reason)}. Showing ≈ for now.`, "failure");
-    }
-    rebuildBatcher();
-}
-
-/**
- * An LLM engine (Claude or Gemini) is selected but no key has been entered,
- * so effectiveEngine() is quietly using Google. Say so — once.
- *
- * Deliberately NOT routed through fallBackToGoogle(): that sets
- * `sessionFallback`, which pins the session to Google until Discord restarts.
- * That is right for a key the engine REJECTED (retrying a wrong key every
- * batch is noise) and wrong for a key that simply has not been pasted yet —
- * pasting one mid-session must start using that engine immediately. So this
- * shares the announce-once shape but keeps its own flag and does not touch
- * the engine.
- *
- * Called from the enqueue path rather than from effectiveEngine(), because
- * effectiveEngine() also runs during render and a toast must not be a render
- * side effect.
- */
-function announceMissingKeyOnce() {
-    if (announcedMissingKey) return;
-    const configured = settings.store.engine as EngineId;
-    if (!isLlmEngine(configured)) return;
-    if (apiKeyFor(configured).trim() !== "") return;
-    announcedMissingKey = true;
-    const { credential } = LLM_ENGINES[configured];
-    toast(`No ${credential} set. Showing ≈ until you add one.`, "failure");
-}
-
 /** A short, human-readable description of a stored entry, for debug logging only. */
 function describeStoredForLog(e: StoredTranslation | undefined): string {
     if (e === undefined) return "‹none›";
     if (isRealTranslation(e)) return `${e.via}:${JSON.stringify(e.text)}`;
-    if ("skipped" in e) return `skipped(${e.via ?? "google-unmarked"})`;
+    if ("skipped" in e) return `skipped(${e.via ?? "unmarked"})`;
     if ("failed" in e) return "failed";
     return "deferred";
 }
@@ -3436,7 +3413,7 @@ function describeStoredForLog(e: StoredTranslation | undefined): string {
 function refuseReasonForLog(existing: StoredTranslation | undefined, next: StoredTranslation): string {
     const existingVia = (existing as { via: EngineId }).via;
     if (!isRealTranslation(next)) return `a marker cannot replace ${existingVia}'s real translation`;
-    return `${next.via} (rank ${ENGINE_RANK[next.via]}) cannot replace ${existingVia} (rank ${ENGINE_RANK[existingVia]})`;
+    return `${next.via} (rank ${rankOf(next.via)}) cannot replace ${existingVia} (rank ${rankOf(existingVia)})`;
 }
 
 /**
@@ -3484,78 +3461,48 @@ function showWeeklyNoteIfDue(): void {
 }
 
 /**
- * Has the fast tier still got something to contribute?
+ * Has ✦ still got something to contribute to this message?
  *
- * Its whole job is "put SOMETHING readable on screen quickly". Once any real
- * translation exists — from either tier — that job is done, and re-running it
- * would only risk replacing a good line with a worse one.
- */
-function needsFast(key: string): boolean {
-    const e = getTranslation(key);
-    return e === undefined || "failed" in e || "deferred" in e;
-}
-
-/**
- * Has the quality tier still got something to contribute?
- *
- * A Google line is a candidate for upgrade, not a finished answer. Only an
- * LLM's own verdict closes a message: an LLM translation, or an LLM skip.
- * A GOOGLE skip deliberately does NOT close it — Google reports "already in
- * the target language" for short messages it merely failed to identify (it
- * returns "ne" unchanged, which isSameText reads as a skip), and those are
- * exactly the messages the quality tier is best at.
- *
- * ...but only while the tier has not already had its one go at this message.
- * The store alone cannot answer that, because a failed quality attempt writes
- * NOTHING to it by design (see runTier): the entry is left exactly as the fast
- * tier wrote it, so every question below still answers "yes, upgradable" and
- * every channel open re-spends a request on the same message. The ledger is
- * what closes that loop — see `qualityAttempted`.
+ * Only ✦'s own verdict closes a message: a ✦ translation, or a ✦ skip. A
+ * marker (⏳ deferred, ⚠ failed) or no entry at all leaves it open, but only
+ * while the attempt ledger does not already hold it: a request that reached
+ * a verdict and produced no line must not be bought again on every channel
+ * open — see `qualityAttempted`.
  */
 function needsQuality(key: string): boolean {
     if (qualityAttempted.has(key)) return false;
     const e = getTranslation(key);
     if (e === undefined) return true;
-    if (isRealTranslation(e)) return ENGINE_RANK[e.via] < 1;
-    if ("skipped" in e) return e.via === undefined || ENGINE_RANK[e.via] < 1;
-    return true;   // failed / deferred — both tiers get another go
+    if (isRealTranslation(e)) return rankOf(e.via) < 1;
+    if ("skipped" in e) return e.via === undefined || rankOf(e.via) < 1;
+    return true;   // failed / deferred — another go
 }
 
-/**
- * Has an LLM already had its say on this message — a real translation or an
- * authoritative skip? Used only to decide whether the force-quality popover
- * button (see `forceQualityPopoverRender`) has anything left to offer.
- *
- * Deliberately `needsQuality()` minus the `qualityAttempted` check: that
- * ledger bounds AUTOMATIC re-attempts (catch-up re-offering the same message
- * on every channel open), and the whole point of the button this feeds is to
- * let the user override it by hand for a message whose one automatic attempt
- * already failed. Only a verdict actually sitting in the store — the one
- * thing forcing another request cannot improve on — closes the door here.
- */
 /** The same text, ignoring case and whitespace: a forced answer that changed nothing. */
 export function sameText(a: string, b: string): boolean {
     const norm = (s: string) => s.toLocaleLowerCase().replace(/\s+/g, "");
     return norm(a) === norm(b);
 }
 
-function hasQualityVerdict(key: string): boolean {
+/**
+ * Does this message already show a real ✦ translation? Used only to decide
+ * whether the ⚡ preview (one of the day's five, when ✦ is off) has anything
+ * left to offer. A ✦ SKIP does not count (decision 3: a ⚡ press always gives
+ * a translation): an automatic skip, from a period or from 0.2.8, is exactly
+ * what a forced preview overrides. Deliberately free of the ledger: the
+ * ledger bounds AUTOMATIC re-attempts, and ⚡ exists to override it.
+ */
+function hasQualityTranslation(key: string): boolean {
     const e = getTranslation(key);
-    if (e === undefined) return false;
-    if (isRealTranslation(e)) return ENGINE_RANK[e.via] >= 1;
-    if ("skipped" in e) return e.via !== undefined && ENGINE_RANK[e.via] >= 1;
-    return false;   // failed / deferred — still worth a forced attempt
+    return e !== undefined && isRealTranslation(e) && rankOf(e.via) >= 1;
 }
 
 /**
- * Reduce a failed batch to one of the beacon's four error codes.
+ * Reduce a failed batch to one of the beacon's error codes.
  *
- * A REDUCTION, not a summary: `res.error` is remote text (it has already been
- * observed carrying a model name, and nothing structurally stops a future
- * engine putting worse in it), so none of it reaches the beacon. The codes are
- * chosen to separate the failures that mean materially different things to
- * someone reading the diagnostics — a wrong key, an exhausted quota, and a
- * native half that never answered all need different advice.
+ * A REDUCTION, not a summary: `res.error` is remote text, so none of it
+ * reaches the beacon. The codes separate the failures that mean materially
+ * different things to someone reading the diagnostics.
  */
 /** The HTTP status an engine's error text names, when it names one. */
 function beaconErrorStatus(res: { error: string } | null): number | undefined {
@@ -3568,82 +3515,138 @@ function beaconErrorCode(res: { error: string } | null): BeaconErrorCode {
     if (/\bHTTP 429\b/.test(res.error)) return "rate-limited";
     if (/\bHTTP 401\b/.test(res.error)) return "auth-rejected";
     // 403 is NOT an auth failure. It is the network, region or ISP being
-    // refused before the key is ever looked at.
+    // refused before the code is ever looked at.
     if (/\bHTTP 403\b/.test(res.error)) return "access-blocked";
     return "engine-error";
 }
 
 /**
- * One flush, for either tier. The tier is entirely described by which engine
- * it was built with — the fast tier is Google by construction and the quality
- * tier is only ever built for an LLM (see rebuildBatcher) — so there is one
- * implementation rather than two, and `engine` no longer changes mid-flush.
- *
- * WHAT IS DELIBERATELY ABSENT: the old "429 → immediately re-run this batch
- * through Google" retry, and with it the `deferred` marker it produced. Both
- * existed because a rate-limited LLM used to be the reader's only translator.
- * It no longer is: the fast tier already sent these exact messages to Google
- * ~19s earlier, so the fallback has ALREADY run and re-sending would spend a
- * second request to obtain a line that is on screen. A quality tier that
- * cannot answer simply stays quiet and the Google line stands.
- *
- * That is also why only the FAST tier writes failure markers. A quality
- * failure is invisible by design — replacing a readable Google subtitle with
- * "⚠ translation failed" would take something away from the reader in
- * exchange for information they can do nothing with. (writeResult/mayReplace
- * already refuses a marker over a REAL translation; the `isQuality` guard is
- * what additionally protects the entries mayReplace considers replaceable —
- * a Google `skipped` marker most of all, since relabelling an
- * already-in-the-target-language message as failed is a pure regression.)
- *
- * Writing nothing is why the `qualityAttempted` ledger has to exist: an
- * invisible failure leaves no trace in the store, so the ledger is the only
- * record that the request was spent. It is written below at the moment the
- * request actually goes out.
- *
- * Everything else is unchanged and load-bearing: the generation guard runs
- * both before and after the network await, `enterCooldown` still parks the
- * engine on a 429, a 401/403 still falls the session back to Google, and the
- * `finally` still releases this tier's in-flight ids however the flush ended.
+ * HOLDS WITHOUT ⏳. Two refusals mean "do not ask now, and do not say
+ * translating": the relay refused on the plan (402 not_linked, ai_required,
+ * not_activated...: ✦ is off, the plan state says so) and the hidden daily
+ * ceiling (429 ai_paused: its own notice says so, showPausedNotice). Until the
+ * hold ends nothing is sent, nothing is marked, and the open channel asks again
+ * by itself when it ends (armDeferredRetry). A plan hold lifts at once when the
+ * relay's answer about the plan changes (onEntitlementChanged).
  */
+let planHeldUntil = 0;
+let pausedUntil = 0;
+/** After a refusal about the plan, ✦ waits this long before asking again (the status answer usually settles it first). */
+export const PLAN_REFUSAL_HOLD_MS = 60_000;
+
+/** The wait before ✦ may be asked again: the latest of a 429's cooldown and the holds above (epoch ms). */
+function relayWaitUntil(): number {
+    return Math.max(cooldownUntil(ENGINE), planHeldUntil, pausedUntil);
+}
+
 /**
- * Resolve every id in a batch that never produced a per-message answer.
- *
- * Fast tier only, and `deferred` always: nothing here is a statement about any
- * individual message. See the block comment on the marker write in runTier.
+ * NO VERDICT, SO NO CHARGE, AND A SIGN. These messages' request never got an
+ * answer about them (no answer at all, a 5xx, a 429, the relay cooling down):
+ * the ledger charge is given back so they may be asked again, each one with
+ * no line yet wears the quiet ⏳ line (never over a real line, a skip, or
+ * anything else that already says something), and the channel's retry is
+ * armed. A forced (⚡) request writes nothing here: the click shows its own
+ * hint for a few seconds.
  */
-function deferBatch(isQuality: boolean, req: BatchRequest, channelId?: string): void {
-    if (isQuality) return;
-    for (const m of req.messages) writeResult(makeKey(m.id, req.targetLang), { deferred: true });
-    // Marked, so the sweep and the timer ask again once the cooldown ends.
-    if (channelId !== undefined && req.messages.length > 0) {
-        deferredChannels.add(channelId);
+function deferMessages(ids: readonly string[], targetLang: string, channelId: string | undefined, forced: boolean): void {
+    for (const id of ids) {
+        const key = makeKey(id, targetLang);
+        qualityAttempted.delete(key);
+        if (forced) continue;
+        const e = getTranslation(key);
+        if (e === undefined || "failed" in e || "deferred" in e) writeResult(key, { deferred: true });
+    }
+    if (!forced && channelId !== undefined && ids.length > 0) {
+        noteWaiting(channelId, ids);
         armDeferredRetry(channelId);
     }
 }
 
+/**
+ * A hold (see planHeldUntil): the charge is given back, nothing is marked, and
+ * the channel asks again when it ends. A ⏳ line already there goes, for these
+ * messages and for every one already waiting in the channel: nothing is asked
+ * during the hold (the hidden ceiling lasts until UTC midnight), so
+ * "translating…" would not be true. They stay on the channel's waiting list.
+ */
+function holdMessages(ids: readonly string[], targetLang: string, channelId: string | undefined): void {
+    for (const id of ids) {
+        const key = makeKey(id, targetLang);
+        qualityAttempted.delete(key);
+        dropDeferred(key);
+    }
+    const waiting = channelId === undefined ? undefined : deferredChannels.get(channelId);
+    if (waiting !== undefined) for (const id of waiting) dropDeferred(makeKey(id, targetLang));
+    if (channelId !== undefined && ids.length > 0) {
+        noteWaiting(channelId, ids);
+        armDeferredRetry(channelId);
+    }
+}
+
+/**
+ * The relay answered for the request but not for this message (a `failed`
+ * row, or no row at all: the model left it out). The FIRST time: ⏳ and asked
+ * again (deferMessages). The second time it has had its chance: the ledger
+ * keeps the charge, so catch-up does not buy it a third time, and the quiet
+ * ⚠ line says it was not translated. ⚡, an edit or a restart asks again.
+ * Nothing at all is written for a forced (⚡) request: the hint says it.
+ */
+function omittedMessage(id: string, targetLang: string, channelId: string | undefined, forced: boolean): void {
+    if (forced) return;
+    const key = makeKey(id, targetLang);
+    if (noteOmitted(key)) {
+        deferMessages([id], targetLang, channelId, false);
+        return;
+    }
+    writeResult(key, { failed: true });
+}
+
+/**
+ * One ✦ flush. 0.2.9 has one tier (the relay), so there is one
+ * implementation, and every message's fate is decided here.
+ *
+ * NEVER BLANK FOR GOOD WITH NO SIGN (0.2.9). With ✦ the only engine there is
+ * no readable line underneath to fall back on, so every way a request can end
+ * leaves the message in a state that says what is happening and recovers by
+ * itself:
+ *  - a translation or a skip: written (the skip shows nothing: the message
+ *    needs no translation);
+ *  - no answer about the whole request (no answer, a 5xx, 403, 401, a 429, a
+ *    cooldown): ⏳, the charge given back, and the channel asks again
+ *    (deferMessages, armDeferredRetry), ever more slowly while it fails;
+ *  - the model left one message out: ⏳ and asked once more, then a quiet ⚠
+ *    (omittedMessage);
+ *  - a refusal about the plan, or the hidden daily ceiling: nothing marked,
+ *    nothing sent until the hold ends (planHeldUntil, pausedUntil);
+ *  - a message edited meanwhile: its answer is dropped and it is asked again
+ *    with the new text (editEpoch).
+ * Failures stay quiet (no toast, no red), and a refusal of the code (401)
+ * asks the relay what this install owns.
+ *
+ * Everything else is load-bearing: the generation guard runs both before and
+ * after the network await, `enterCooldown` parks the engine on a 429, and the
+ * `finally` releases the in-flight ids however the flush ended.
+ */
 async function runTier(
-    engine: EngineId, req: BatchRequest, myGeneration: number,
+    req: BatchRequest, myGeneration: number,
     channelId?: string,
     // Manual-⚡-only: set by forceQualityTranslate so it can learn WHY this
     // flush produced nothing, in terms the reader can act on (see
-    // ForcedHint's own doc). Both onFlush closures in rebuildBatcher leave
-    // this undefined, so every `report?.(...)` below is a no-op for the
-    // automatic pipeline — its invisible-failure behaviour is unchanged.
+    // ForcedHint's own doc). The batcher's onFlush leaves this undefined.
     report?: (outcome: ForcedHint) => void,
     // The edit counter of each message when its text was fixed (at flush).
     // Only a split passes it down, so a part sent later still compares
     // against the text it actually carries.
     epochs?: ReadonlyMap<string, number>,
     // G2: the parts of ONE long message (runLongMessage). Their rows go here
-    // instead of the store, so only the whole message is ever written.
+    // instead of the store, so only the whole message is ever written, and
+    // runLongMessage decides that message's fate.
     sink?: (results: Result[]) => void
 ): Promise<void> {
-    const isQuality = engine !== "google";
-    // The in-flight set belonging to THIS tier. The other tier's request for
-    // the same id (if any) is a separate round trip and settles on its own.
-    const inFlightSet = isQuality ? inFlightQuality : inFlightFast;
     const debug = settings.store.debugLogging;
+    // A forced (⚡) request or the parts of a long message write no markers:
+    // the click and runLongMessage settle those messages themselves.
+    const quiet = report !== undefined || sink !== undefined;
     // Every id this call was handed, released in the finally below whatever
     // the request ends up carrying (fitting may drop or split messages).
     const handedIds = req.messages.map(m => m.id);
@@ -3659,66 +3662,45 @@ async function runTier(
         stale.add(id);
         return true;
     };
+    const live = (ids: readonly string[]) => ids.filter(id => !isStale(id));
 
     if (debug) {
-        const ids = req.messages.map(m => m.id);
-        logger.debug(`[flush] ${engine}: batch of ${ids.length} — ids=${JSON.stringify(ids)}`);
+        logger.debug(`[flush] relay: batch of ${handedIds.length} — ids=${JSON.stringify(handedIds)}`);
     }
 
     try {
-        // Superseded by a later rebuild (settings changed, or a fallback
-        // fired) before this flush even started — this closure's `engine` no
-        // longer matches reality, so drop it rather than send under a stale
-        // configuration. The finally below still releases the ids: a batch
-        // stranded here that stayed "in flight" forever could never be
-        // retried by catch-up.
-        //
-        // DEFENCE IN DEPTH, AND CURRENTLY UNREACHABLE — measured, not assumed.
-        // Instrumented and run against the whole suite plus five hand-built
-        // staleness scenarios (settings change mid-debounce, two channels at
-        // once, a 401 fallback rebuilding while a fast batch sits queued,
-        // stop()/start(), and a rebuild during a queued quality batch): this
-        // branch fired ZERO times, while the post-await guard below fired as
-        // expected. The reason is an invariant in rebuildBatcher(): every
-        // `batcherGeneration++` is bracketed by drainPending() — which clears
-        // each batcher's armed timer and empties its queue — and dispose(),
-        // with no await anywhere between, so no old-generation closure can
-        // still be INVOKED afterwards. Only a flush already past this line and
-        // awaiting the network can be superseded.
-        //
-        // KEEP IT ANYWAY. It costs one integer compare, and it becomes live
-        // and load-bearing the moment anyone adds an await inside
-        // rebuildBatcher, stops draining, or schedules onFlush through a
-        // microtask instead of calling it synchronously. Because it is
-        // unreachable, no behavioural test can pin it (removing it changes
-        // nothing observable); the invariant that keeps it unreachable is
-        // pinned instead, by "leaves no stale timer behind" in index.test.ts.
+        // Superseded by a later rebuild (the plan or the reading language
+        // changed) before this flush even started: drop it rather than send
+        // under a stale configuration. The finally below still releases the
+        // ids. Unreachable today (rebuildBatcher drains and disposes with no
+        // await in between) and kept as defence in depth; the invariant is
+        // pinned by "leaves no stale timer behind" in index.test.ts.
         if (myGeneration !== batcherGeneration) {
-            if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (pre-gate)`);
+            if (debug) logger.debug("[flush] relay: blocked — stale generation (pre-gate)");
             report?.({ kind: "gate" });
             return;
         }
 
+        // A hold (a refusal about the plan, the hidden ceiling): nothing is
+        // sent and nothing is marked. See planHeldUntil.
+        if (Date.now() < Math.max(planHeldUntil, pausedUntil)) {
+            if (debug) logger.debug("[flush] relay: held — the relay refused on the plan or the daily ceiling");
+            report?.({ kind: "cooldown" });
+            if (!quiet) holdMessages(handedIds, req.targetLang, channelId);
+            return;
+        }
+
         // Cooling down after a 429: do not spend a request to be told so
-        // again. Nothing is marked and nothing is diverted — the fast tier's
-        // Google line for these same messages is already on screen.
-        // The fast tier is included now. Google's free endpoint rate-limits
-        // by IP and answers 429 with an HTML block page; retrying into that is
-        // how a transient block becomes a sustained one — and unlike the LLMs,
-        // Google has no rate gate to fall back on.
-        if (isCoolingDown(engine)) {
+        // again. The messages wear ⏳ and are asked again just after it.
+        if (isCoolingDown(ENGINE)) {
             if (debug) {
                 logger.debug(
-                    `[flush] ${engine}: blocked — cooling down for another `
-                    + `${formatCountdown(cooldownUntil(engine) - Date.now())}`
+                    "[flush] relay: blocked — cooling down for another "
+                    + `${formatCountdown(cooldownUntil(ENGINE) - Date.now())}`
                 );
             }
             report?.({ kind: "cooldown" });
-            // A fast-tier batch skipped here never went out, so no id in it
-            // has an answer. Leave them readable as "delayed" rather than
-            // blank — and resolved, so catch-up sees work already accounted
-            // for instead of re-requesting into the same closed door.
-            deferBatch(isQuality, req, channelId);
+            if (sink === undefined) deferMessages(handedIds, req.targetLang, channelId, report !== undefined);
             return;
         }
 
@@ -3726,81 +3708,66 @@ async function runTier(
         // gate slot: a 413 or 400 is refused every time it is sent, and a long
         // message kept in the context ring poisoned every later batch in the
         // channel. Each part of a split goes through the gate on its own.
-        if (isQuality) {
-            req = withinTextLimit(req, channelId);
-            // G2: a message still over the per-text limit is translated whole,
-            // in parts, on its own (runLongMessage). Never cut to its start.
-            if (sink === undefined) {
-                const long = req.messages.filter(m => m.text.length > LLM_TEXT_MAX);
-                if (long.length > 0) {
-                    // A reply to a long message keeps its parent: as a clipped
-                    // copy, since the parent goes out as "<id>~p<n>" rows.
-                    req = { ...req, messages: withParentCopies(req.messages.filter(m => m.text.length <= LLM_TEXT_MAX), req.messages) };
-                    for (const m of long) {
-                        if (await runLongMessage(engine, m, req, myGeneration, channelId, report, sentEpoch)) stale.add(m.id);
-                    }
+        req = withinTextLimit(req, channelId);
+        // G2: a message still over the per-text limit is translated whole,
+        // in parts, on its own (runLongMessage). Never cut to its start.
+        if (sink === undefined) {
+            const long = req.messages.filter(m => m.text.length > LLM_TEXT_MAX);
+            if (long.length > 0) {
+                // A reply to a long message keeps its parent: as a clipped
+                // copy, since the parent goes out as "<id>~p<n>" rows.
+                req = { ...req, messages: withParentCopies(req.messages.filter(m => m.text.length <= LLM_TEXT_MAX), req.messages) };
+                for (const m of long) {
+                    if (await runLongMessage(m, req, myGeneration, channelId, report, sentEpoch)) stale.add(m.id);
                 }
             }
-            if (req.messages.length === 0) return;
-            const parts = fitLlmRequest(req);
-            if (parts.length > 1) {
-                if (debug) logger.debug(`[flush] ${engine}: request too large, split into ${parts.length}`);
-                for (const part of parts) for (const m of part.messages) delegated.add(m.id);
-                for (const part of parts) await runTier(engine, part, myGeneration, channelId, report, sentEpoch, sink);
-                return;
-            }
-            req = parts[0]!;
-            // P8: so an "out of context" report can be checked against what
-            // the model was actually given. Counts only, never message text.
-            if (debug) {
-                const replies = req.messages.filter(m => m.replyToId !== undefined);
-                const inBatch = replies.filter(m => req.messages.some(x => x.id === m.replyToId)).length;
-                const quoted = replies.filter(m => m.replyTo !== undefined && !req.messages.some(x => x.id === m.replyToId)).length;
-                logger.debug(
-                    `[flush] ${engine}: context=${req.context.length} lines, replies=${replies.length} `
-                    + `(parent in batch ${inBatch}, parent quoted ${quoted}, parent missing ${replies.length - inBatch - quoted})`
-                );
-            }
+        }
+        if (req.messages.length === 0) return;
+        const parts = fitLlmRequest(req);
+        if (parts.length > 1) {
+            if (debug) logger.debug(`[flush] relay: request too large, split into ${parts.length}`);
+            for (const part of parts) for (const m of part.messages) delegated.add(m.id);
+            for (const part of parts) await runTier(part, myGeneration, channelId, report, sentEpoch, sink);
+            return;
+        }
+        req = parts[0]!;
+        // P8: so an "out of context" report can be checked against what
+        // the model was actually given. Counts only, never message text.
+        if (debug) {
+            const replies = req.messages.filter(m => m.replyToId !== undefined);
+            const inBatch = replies.filter(m => req.messages.some(x => x.id === m.replyToId)).length;
+            const quoted = replies.filter(m => m.replyTo !== undefined && !req.messages.some(x => x.id === m.replyToId)).length;
+            logger.debug(
+                `[flush] relay: context=${req.context.length} lines, replies=${replies.length} `
+                + `(parent in batch ${inBatch}, parent quoted ${quoted}, parent missing ${replies.length - inBatch - quoted})`
+            );
         }
 
-        // Only the LLM engines are rate-gated — Google is per-message with its
-        // own concurrency cap (engines/google.ts) and was never the source of
-        // the 429 storm this gate exists for.
-        if (isQuality) {
-            const gateWaitStarted = Date.now();
-            await acquireSlot();
-            if (debug) {
-                const waitedMs = Date.now() - gateWaitStarted;
-                logger.debug(
-                    waitedMs > 5
-                        ? `[flush] ${engine}: rate gate — waited ${waitedMs}ms for a slot`
-                        : `[flush] ${engine}: rate gate — slot was available immediately`
-                );
-            }
-            // stop()/rebuild may have happened while this flush sat behind the
-            // gate (resetRateGate() wakes queued waiters immediately for
-            // exactly that reason, rather than leaving them to time out on the
-            // next refill tick). Re-check before spending a real request on a
-            // batch nothing will ever read the result of.
-            if (myGeneration !== batcherGeneration) {
-                if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (post-gate)`);
-                report?.({ kind: "gate" });
-                return;
-            }
+        const gateWaitStarted = Date.now();
+        await acquireSlot();
+        if (debug) {
+            const waitedMs = Date.now() - gateWaitStarted;
+            logger.debug(
+                waitedMs > 5
+                    ? `[flush] relay: rate gate — waited ${waitedMs}ms for a slot`
+                    : "[flush] relay: rate gate — slot was available immediately"
+            );
+        }
+        // stop()/rebuild may have happened while this flush sat behind the
+        // gate (resetRateGate() wakes queued waiters immediately for exactly
+        // that reason). Re-check before spending a real request on a batch
+        // nothing will ever read the result of.
+        if (myGeneration !== batcherGeneration) {
+            if (debug) logger.debug("[flush] relay: blocked — stale generation (post-gate)");
+            report?.({ kind: "gate" });
+            return;
         }
 
-        // The request is about to be SPENT, so record it before it can fail in
-        // any of the ways below. This is the one place that knows a quality
-        // request actually left the client — every earlier `return` above
-        // (stale generation, cooldown, rate gate) cost nothing and must leave
-        // the message retryable. A quality failure writes nothing to the store,
-        // so without this ledger entry there is no record anywhere that the
-        // attempt happened and catch-up re-requests it forever. See
-        // `qualityAttempted`.
-        if (isQuality) {
-            // A part of a long message is not a message: runLongMessage charged the message.
-            if (sink === undefined) for (const m of req.messages) markQualityAttempted(makeKey(m.id, req.targetLang));
-        }
+        // The request is about to be SPENT, so record it before it can fail.
+        // Every earlier `return` above cost nothing and left the message
+        // retryable. A part of a long message is not a message:
+        // runLongMessage charged the message.
+        if (sink === undefined) for (const m of req.messages) markQualityAttempted(makeKey(m.id, req.targetLang));
 
         // `null` means the IPC call itself rejected — distinct from an
         // `ok: false` response, which is an engine-level failure the native
@@ -3808,45 +3775,36 @@ async function runTier(
         // un-awaited, so an unhandled rejection here would otherwise just
         // vanish the batch with no marker.
         let res: Awaited<ReturnType<typeof transport.translateBatch>> | null;
+        qualityRequestsOut++;
         try {
-            // The relay is told which install asks (the 3-computer limit).
-            const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
-            res = await transport.translateBatch(
-                engine,
-                isLlmEngine(engine) ? apiKeyFor(engine) : "",
-                JSON.stringify(engine === "google" ? withSourceLangs(withoutEdgeMentions(req)) : req),
-                modelFor(engine),
-                debug,
-                install
-            );
+            // The saved code, or the install bearer when there is none; the
+            // relay is told which install asks (the 3-computer limit).
+            const { credential, install } = await relayCredentials();
+            res = await transport.translateBatch(ENGINE, credential, JSON.stringify(req), "", debug, install);
         } catch {
             res = null;
+        } finally {
+            qualityRequestsOut--;
         }
 
         // THE race this second guard exists for: rebuildBatcher() can run
-        // WHILE the line above is awaiting the network round trip (a settings
-        // change, or an LLM engine's 401 triggering fallBackToGoogle
-        // mid-flight). The check before the await only catches a flush that
-        // was already stale when it started — it cannot catch one that went
-        // stale during the await. Re-check before any write, so a superseded
-        // response is dropped instead of landing under the old engine's key.
+        // WHILE the line above is awaiting the network round trip (the plan
+        // or the reading language changed). Re-check before any write, so a
+        // superseded response is dropped. Its charge is given back: the
+        // rebuild's catch-up asks again for whatever is still on screen.
         if (myGeneration !== batcherGeneration) {
-            if (debug) logger.debug(`[flush] ${engine}: blocked — stale generation (post-response)`);
+            if (debug) logger.debug("[flush] relay: blocked — stale generation (post-response)");
+            if (sink === undefined) for (const m of req.messages) qualityAttempted.delete(makeKey(m.id, req.targetLang));
             return;
         }
 
         if (res === null || !res.ok) {
             if (debug) {
-                logger.debug(
-                    `[flush] ${engine}: response not ok — `
-                    + (res === null ? "IPC call rejected" : res.error)
-                );
+                logger.debug("[flush] relay: response not ok — " + (res === null ? "IPC call rejected" : res.error));
             }
             // Tell the beacon THAT something failed and roughly what class of
             // thing it was — never the engine's message, which is remote text
-            // (see BEACON_ERROR_CODES). This is what lets the installer report
-            // "loaded, but erroring" instead of the indistinguishable "loaded,
-            // nothing to translate yet".
+            // (see BEACON_ERROR_CODES).
             const errorCode = beaconErrorCode(res);
             recordError(errorCode, beaconErrorStatus(res));
 
@@ -3854,172 +3812,76 @@ async function runTier(
             // text): the same request is refused every time, so re-send it
             // smaller, now. Halves first, then a lone message without its
             // context. Each part meets the rate gate on its own.
-            if (isQuality && res !== null && isOversizeRefusal(engine, res.error)) {
+            if (res !== null && isOversizeRefusal(res.error)) {
                 const smaller = shrinkAfterRefusal(req);
                 if (smaller.length > 0) {
-                    logger.info(`[flush] ${engine}: request refused for its size; re-sending in ${smaller.length} smaller part(s)`);
+                    logger.info(`[flush] relay: request refused for its size; re-sending in ${smaller.length} smaller part(s)`);
+                    if (sink === undefined) for (const m of req.messages) qualityAttempted.delete(makeKey(m.id, req.targetLang));
                     for (const part of smaller) for (const m of part.messages) delegated.add(m.id);
-                    for (const part of smaller) await runTier(engine, part, myGeneration, channelId, report, sentEpoch, sink);
+                    for (const part of smaller) await runTier(part, myGeneration, channelId, report, sentEpoch, sink);
                     return;
                 }
             }
 
-            // REFUND THE LEDGER. It was charged above, at send time, and the
-            // provider has now refused the whole batch — nothing was judged,
-            // so nothing was bought. The ledger's own trade-off ("a message
-            // whose one attempt failed never gets its ✦ — the readable ≈ line
-            // is still there") was priced for a healthy fast tier; when BOTH
-            // tiers are down, the un-refunded ledger turns a throttled minute
-            // into a permanent ⚠ for every message in the batch, because the
-            // groq skip that would clean the marker is never allowed to run
-            // again. Per-message verdicts below still charge — a model that
-            // OMITTED a message from its answer has judged it, and re-buying
-            // that forever is the loop the ledger exists to stop.
-            if (isQuality) {
-                for (const m of req.messages) {
-                    const k = makeKey(m.id, req.targetLang);
-                    // Only while the reader is BLIND. With a readable line on
-                    // screen (Google delivered), the original trade-off stands
-                    // in full: retrying an already-readable message on every
-                    // channel open is the quota loop the ledger was built to
-                    // stop. The refund is for the case the trade-off never
-                    // priced — marker on screen, nothing readable, and the one
-                    // engine that could fix it barred from trying again.
-                    if (!isRealTranslation(getTranslation(k))) qualityAttempted.delete(k);
-                }
-            }
             // Manual-⚡-only — see ForcedHint's own doc. Reuses the same
             // closed set of categories the beacon just recorded, so this can
-            // never leak the engine's own (potentially remote-text-bearing)
-            // error string into the DOM.
+            // never leak the engine's own error string into the DOM.
             report?.({ kind: "failed", code: errorCode });
+            const ids = sink === undefined ? live(req.messages.map(m => m.id)) : [];
 
-            // P9: the relay went unanswered (anything but a refusal about
-            // what this install owns). Statuses and titles take ≈ meanwhile.
-            if (engine === "relay" && !(res !== null && isEntitlementRefusal(res.errorCode))) relayFailing = true;
-            if (res !== null && engine === "relay" && isEntitlementRefusal(res.errorCode)) {
-                // The relay refused on what this install owns (AI lapsed, a
-                // 4th computer), not on the network or the code's validity:
-                // ask it again, and the session follows its answer. No red
-                // toast, no fallback pin: ≈ is already on screen.
+            // THE HIDDEN DAILY CEILING (spec decision 5): one plain notice,
+            // nothing more is sent until the relay's wait is over (UTC
+            // midnight), and no ⏳ line says "translating" meanwhile.
+            if (res !== null && res.errorCode === "ai_paused") {
+                pausedUntil = Date.now() + (typeof res.retryAfterMs === "number" && res.retryAfterMs > 0 ? res.retryAfterMs : DEFAULT_COOLDOWN_MS);
+                tasteLog("the relay paused ✦ for today (the daily ceiling)");
+                showPausedNotice();
+                if (!quiet) holdMessages(ids, req.targetLang, channelId);
+                return;
+            }
+
+            // A refusal about what this install owns (✦ off, not linked, a 4th
+            // computer): ask the relay again, and the session follows its
+            // answer. Nothing is marked; ✦ waits PLAN_REFUSAL_HOLD_MS (or
+            // until that answer) instead of re-asking on every message.
+            if (res !== null && isEntitlementRefusal(res.errorCode)) {
                 tasteLog(`the relay refused ✦ (${res.errorCode}); asking what this install owns`);
+                planHeldUntil = Date.now() + PLAN_REFUSAL_HOLD_MS;
                 refreshAfterRefusal();
-            } else if (res !== null) {
-                // Park the engine for as long as the API asked for. Still the
-                // whole point of the cooldown: retrying into a wall that just
-                // rejected us is how half the observed traffic became 429s.
-                // (`retryAfterMs` is only ever set for a 429 — see native.ts.)
-                if (isLlmEngine(engine) && res.retryAfterMs) {
-                    enterCooldown(
-                        engine, res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel,
-                        res.error
-                    );
-                } else if (!isLlmEngine(engine) && /\b429\b/.test(res.error)) {
-                    // GOOGLE_COOLDOWN_MS, not the 60s default - see types.ts.
-                    // One shed request parking the engine for a minute is how
-                    // "waiting for the translator" measured in minutes.
-                    // Google, parked through the plain store rather than
-                    // enterCooldown: that function retunes the rate gate and
-                    // announces a quota, and Google is behind neither — it is
-                    // per-message with its own concurrency cap, and its free
-                    // endpoint states no quota to retune towards. All that is
-                    // wanted here is "stop asking for a while".
-                    setCooldown(engine, Date.now() + (res.retryAfterMs ?? GOOGLE_COOLDOWN_MS));
-                }
-                // Retrying either of these every batch would be pure noise, so
-                // both fall back to Google for the rest of the session — but
-                // they are told apart, because the remedies are opposites.
-                //
-                // 403 means the request was refused before the key was
-                // consulted: a VPN, a region, an ISP. Reporting it as a
-                // rejected key sends the user to replace a credential that
-                // works. Observed live — Groq answered 403 to an
-                // UNAUTHENTICATED request from the same machine.
-                if (isLlmEngine(engine) && /\b403\b/.test(res.error)) {
-                    fallBackToGoogle(
-                        `cannot reach ${LLM_ENGINES[engine].label} from this network`,
-                        "blocked"
-                    );
-                } else if (isLlmEngine(engine) && /\b401\b/.test(res.error)) {
-                    fallBackToGoogle(rejectedCredentialText(engine), "key");
-                }
+                if (!quiet) holdMessages(ids, req.targetLang, channelId);
+                else for (const id of ids) qualityAttempted.delete(makeKey(id, req.targetLang));
+                return;
             }
 
-            // Markers only from the FAST tier — and writeResult still refuses
-            // to put one over a real line. An id with no entry at all is
-            // indistinguishable from one that was never requested, so the fast
-            // tier must leave SOMETHING resolved or catch-up re-requests it
-            // forever.
-            if (!isQuality) {
-                for (const m of req.messages) {
-                    if (isStale(m.id)) continue;
-                    writeResult(makeKey(m.id, req.targetLang), { deferred: true });
-                }
-                if (channelId !== undefined) {
-                    deferredChannels.add(channelId);
-                    armDeferredRetry(channelId);
-                }
-                // THE 19-SECOND RACE. These messages were enqueued to BOTH
-                // tiers in one tick, so the quality timer was armed BEFORE this
-                // failure existed — it asked "is Google cooling down?" and was
-                // truthfully told no, picked the 20s window, and an armed
-                // window keeps its deadline. Arm-time logic cannot see a
-                // failure that happens after arming; only the failure itself
-                // can, and this is the moment it is known. Flush now: the
-                // reader has just gone blind, and the LLM is everything they
-                // have. (Measured before this existed: the ✦ line landed 19
-                // seconds after the ⏳ marker. The rate gate still meters the
-                // flush this triggers, exactly as it meters any other.)
-                qualityBatcher?.flushNow();
+            // P9: the relay went unanswered. Surfaces read this.
+            relayFailing = true;
+            if (res !== null) {
+                // Park the engine for as long as the relay asked for: retrying
+                // into a wall that just rejected us is how half the observed
+                // traffic became 429s. (`retryAfterMs` comes with a 429, or a
+                // 503 that states its own wait — see native.ts.)
+                if (res.retryAfterMs) enterCooldown(ENGINE, res.retryAfterMs, res.quotaLimitPerMinute, res.error);
+                // The code was refused (401): the relay's status answer says
+                // whether it is dead (applyStatus drops it). Asked again
+                // meanwhile like any failure, ever more slowly.
+                if (/\bHTTP 401\b/.test(res.error)) refreshAfterRefusal();
             }
+            deferMessages(ids, req.targetLang, channelId, report !== undefined);
             return;
         }
 
-        // What the provider itself said is left, when the provider says
-        // anything (OpenAI-compatible engines only — see native.ts's
-        // `providerRateLimit`). Two consumers, and they want different things
-        // from the same number:
-        //
-        //  - the quota indicator, which can now show the provider's truth
-        //    instead of our guess (see describeQuotaState). This is the fix
-        //    for `✦ 3` sitting next to an instant 429.
-        //  - the rate gate, which retunes from it exactly as it already does
-        //    from a 429's stated quota — but only ever downwards, and without
-        //    persisting it (see tuneRateGateToProviderBudget for why both).
-        //
-        // Recorded BEFORE the results are written, so a reading is not lost to
-        // an exception in the write loop, and only for the quality tier: the
-        // fast tier is Google, which is not gated, not keyed and reports none
-        // of this.
-        if (engine === "relay") relayFailing = false;
-        if (isQuality && isLlmEngine(engine)) {
-            // The CEILING the provider states for this credential (the relay's
-            // rpmLimit). A real number beats the untaught guess, and learning
-            // it from a success means the gate reaches the relay's rate
-            // without ever buying a 429 first. Same retune as a 429's stated
-            // quota, and persisted the same way.
-            if (typeof res.quotaLimitPerMinute === "number") {
-                const retuned = tuneRateGateToObservedLimit(res.quotaLimitPerMinute);
-                if (debug && retuned) {
-                    logger.debug(
-                        `[flush] ${engine}: rate gate retuned to the stated ceiling `
-                        + `(${res.quotaLimitPerMinute}/min) — now one request every ${rateGateSettings().refillMs}ms`
-                    );
-                }
-            }
-            const reported = res.providerRateLimit;
-            recordProviderQuota(engine, reported);
-            if (reported !== undefined && typeof reported.remainingRequests === "number") {
-                const retuned = tuneRateGateToProviderBudget(
-                    reported.remainingRequests, reported.resetRequestsMs
+        // The CEILING the relay states for this credential (rpmLimit). A real
+        // number beats the untaught guess, and learning it from a success
+        // means the gate reaches the relay's rate without ever buying a 429
+        // first. Same retune as a 429's stated quota, and persisted the same way.
+        relayFailing = false;
+        if (typeof res.quotaLimitPerMinute === "number") {
+            const retuned = tuneRateGateToObservedLimit(res.quotaLimitPerMinute);
+            if (debug && retuned) {
+                logger.debug(
+                    `[flush] relay: rate gate retuned to the stated ceiling `
+                    + `(${res.quotaLimitPerMinute}/min) — now one request every ${rateGateSettings().refillMs}ms`
                 );
-                if (debug && retuned) {
-                    logger.debug(
-                        `[flush] ${engine}: rate gate retuned from the provider's own remaining `
-                        + `count (${reported.remainingRequests} left) — now one request every `
-                        + `${rateGateSettings().refillMs}ms`
-                    );
-                }
             }
         }
 
@@ -4027,104 +3889,86 @@ async function runTier(
             sink(res.results);
             return;
         }
+        const forced = report !== undefined;
+        const answered = new Set<string>();
+        let verdicts = 0;
         for (const r of res.results) {
+            // A row for a message this request never carried is dropped: it
+            // must never write a line under some other message.
+            const sent = req.messages.find(m => m.id === r.id);
+            if (sent === undefined || answered.has(r.id)) continue;
+            answered.add(r.id);
             const key = makeKey(r.id, req.targetLang);
             if (isStale(r.id)) {
-                if (debug) logger.debug(`[response] ${engine} ${r.id}: dropped, the message was edited meanwhile`);
+                if (debug) logger.debug(`[response] relay ${r.id}: dropped, the message was edited meanwhile`);
                 continue;
             }
             if (debug) {
                 const outcome = "failed" in r ? "failed" : r.skip ? "skip" : `translation (${r.lang})`;
-                logger.debug(`[response] ${engine} ${r.id}: ${outcome}`);
+                logger.debug(`[response] relay ${r.id}: ${outcome}`);
             }
             if ("failed" in r) {
-                // Transport says "the moment was bad"; a verdict says "this
-                // message is bad". Only the verdict may wear ⚠ — a wall of
-                // "translation failed" under ordinary Spanish messages during
-                // an IP throttle (observed 2026-09-03) was transport wearing
-                // the verdict's clothes. Deferred is retried by catch-up and
-                // reads as waiting, which is what it is.
-                if (!isQuality) {
-                    const transport = "transport" in r && r.transport === true;
-                    writeResult(key, transport ? { deferred: true } : { failed: true });
-                    if (transport && channelId !== undefined) {
-                        deferredChannels.add(channelId);
-                        armDeferredRetry(channelId);
-                    }
-                }
+                // Transport says "the moment was bad" (⏳, asked again); a
+                // verdict says the model gave no usable row (omittedMessage).
+                if ("transport" in r && r.transport === true) deferMessages([r.id], req.targetLang, channelId, forced);
+                else omittedMessage(r.id, req.targetLang, channelId, forced);
                 continue;
             }
+            verdicts++;
             // A ⚡ (forced) answer that is the message itself, or a skip from
             // a relay that predates `force`: the message is already in the
             // reader's language. Said in one short line, never a duplicate.
             // A forced skip never takes a readable line away, though: it is
             // only written where there is no translation to keep.
-            if (req.force === true && isQuality) {
-                const sent = req.messages.find(m => m.id === r.id);
-                if (r.skip || (sent !== undefined && sameText(r.text, sent.text))) {
+            if (req.force === true) {
+                if (r.skip || sameText(r.text, sent.text)) {
                     const existing = getTranslation(key);
                     if (r.skip && isRealTranslation(existing)) continue;
-                    writeResult(key, { lang: r.skip ? req.targetLang : r.lang, text: sent?.text ?? "", via: engine, same: true });
+                    writeResult(key, { lang: r.skip ? req.targetLang : r.lang, text: sent.text, via: ENGINE, same: true });
                     continue;
                 }
             }
             if (r.skip) {
                 // A skip has nothing to DISPLAY, but something must still be
-                // WRITTEN, for the same "no entry looks like never requested"
-                // reason as above — in a mixed-language chat most messages ARE
-                // already in the target language, so this is the common case.
-                //
-                // `via` is what makes the skip interpretable later: a GOOGLE
-                // skip is not authoritative (Google echoes short and romanized
-                // text back unchanged — "salam khouya kifach" comes back
-                // byte-identical — which isSameText reads as "already in the
-                // target language" when it actually means "Google gave up"),
-                // while an LLM skip closes the message. needsQuality() reads
-                // exactly that distinction. Written through writeResult so it
-                // still cannot replace a real translation: a Google skip must
-                // never erase an LLM line.
-                writeResult(key, { skipped: true, via: engine });
+                // WRITTEN: no entry looks like never requested, and catch-up
+                // would re-send it on every channel open. In a mixed-language
+                // chat most messages ARE already in the target language, so
+                // this is the common case. Written through writeResult so it
+                // cannot replace a real translation.
+                writeResult(key, { skipped: true, via: ENGINE });
                 continue;
             }
-            // `engine` is recorded in the value because it is no longer part
-            // of the key — and it is what makes a Google line render as ≈
-            // (approximate) instead of claiming ✦. Routed through
-            // writeResult(): the two tiers write the same key from different
-            // latencies, so this write has to ask whether it is an improvement.
-            // Recorded from the SENT text, so the lookup in enqueue() keys on
-            // exactly what a later identical message will present.
-            const sent = req.messages.find(m => m.id === r.id);
-            // Google was sent the words without the edge mentions (the
-            // mention case): they are put back, as written, around its answer.
-            const edges = isQuality || sent === undefined ? undefined : edgesFor(sent);
-            const text = edges === undefined ? r.text : withEdgeMentions(edges.lead, r.text, edges.trail);
-            const value: StoredTranslation = { lang: r.lang, text, via: engine, conf: r.conf };
+            const value: StoredTranslation = { lang: r.lang, text: r.text, via: ENGINE };
             writeResult(key, value);
             // P7: stored by the same rule it is reused by. A reply's line was
             // read against its parent, so it must never answer a non-reply.
-            if (sent !== undefined && phraseReusable(sent)) rememberPhrase(sent.text, req.targetLang, value);
+            if (phraseReusable(sent)) rememberPhrase(sent.text, req.targetLang, value);
+        }
+        // An id the relay did not answer at all is an omitted row too: left
+        // alone, it would be charged and blank for the rest of the session.
+        for (const m of req.messages) {
+            if (answered.has(m.id) || isStale(m.id)) continue;
+            omittedMessage(m.id, req.targetLang, channelId, forced);
         }
 
-        // THE RECOVERY SWEEP (see deferredChannels). Fast tier only, and only
-        // on evidence: at least one message in this flush got a real answer,
-        // so Google is talking to us again and the channel's ⏳ backlog is
-        // worth re-asking about. catchUp re-enqueues whatever is still
-        // deferred; a channel that is not focused is catch-up's own concern.
-        //
-        // Run AFTER the finally below has released this batch's ids, so a
-        // message that failed in this same batch is asked again too.
-        if (!isQuality && channelId !== undefined && deferredChannels.has(channelId)
-            && res.results.some(r => !("failed" in r))) {
-            deferredChannels.delete(channelId);
+        // THE RECOVERY SWEEP (see deferredChannels), only on evidence: at
+        // least one message in this flush got a real answer, so the relay is
+        // talking to us again and the channel's ⏳ backlog is worth re-asking
+        // about. Run AFTER the finally below has released this batch's ids,
+        // so a message deferred in this same batch is asked again too. The
+        // retry timer starts again from its first, short delay.
+        if (channelId !== undefined && verdicts > 0 && deferredChannels.has(channelId)) {
             clearDeferredRetry(channelId);
-            sweepChannel = channelId;
+            if (stillWaiting(channelId)) sweepChannel = channelId;
         }
     } finally {
         // Fires once this flush has fully settled, whichever way it went
         // (sent, skipped for cooldown, stranded by a rebuild, rejected). That
         // is the earliest point these ids are safe to retry — not when they
         // were queued, and not only on the happy path.
-        for (const id of handedIds) if (!delegated.has(id)) inFlightSet.delete(id);
+        for (const id of handedIds) if (!delegated.has(id)) inFlightQuality.delete(id);
+        // A ⚡ press that waited for this request (forceAfterFlight).
+        if (forceAfterFlight.size > 0) releaseForcedAfterFlight(handedIds.filter(id => !delegated.has(id)));
         // Ask again for every message edited while this request was out, now
         // that its id is free. enqueue() applies the focus and skip rules.
         for (const id of stale) {
@@ -4136,9 +3980,8 @@ async function runTier(
 }
 
 /** A refusal that says "too big", which the same request will get every time. */
-function isOversizeRefusal(engine: EngineId, error: string): boolean {
-    if (/\bHTTP 413\b/.test(error)) return true;
-    return engine === "relay" && /\bHTTP 400\b/.test(error);
+function isOversizeRefusal(error: string): boolean {
+    return /\bHTTP (?:413|400)\b/.test(error);
 }
 
 /**
@@ -4191,42 +4034,54 @@ function partsRequest(m: BatchRequest["messages"][number], base: BatchRequest): 
  * G2. Translate one message over the relay's per-text limit WHOLE: its parts
  * go through runTier (same gate, cooldowns and error handling, consecutive
  * requests when they do not fit one), and the ✦ line is written only when
- * every part came back. A part that failed leaves the ≈ line as it is: a ✦
- * of only part of the message never replaces a ≈ of all of it.
+ * every part came back. A ✦ of only part of the message is never shown.
+ * Nothing back at all is no verdict (⏳, asked again); some parts missing is
+ * an omitted message (asked once more, then the quiet ⚠), as in runTier.
  * Returns true when the message was edited while its parts were out, so the
  * caller asks again with the new text.
  */
 async function runLongMessage(
-    engine: EngineId, m: BatchRequest["messages"][number], base: BatchRequest, myGeneration: number,
+    m: BatchRequest["messages"][number], base: BatchRequest, myGeneration: number,
     channelId: string | undefined, report: ((outcome: ForcedHint) => void) | undefined,
     epochs: ReadonlyMap<string, number>
 ): Promise<boolean> {
     const key = makeKey(m.id, base.targetLang);
+    const forced = report !== undefined;
     markQualityAttempted(key);
     const { req, parts, seps } = partsRequest(m, base);
     const rows = new Map<string, Result>();
-    await runTier(engine, req, myGeneration, channelId, report, undefined, results => {
+    await runTier(req, myGeneration, channelId, report, undefined, results => {
         for (const r of results) rows.set(r.id, r);
     });
-    if (myGeneration !== batcherGeneration) return false;
+    if (myGeneration !== batcherGeneration) {
+        qualityAttempted.delete(key);
+        return false;
+    }
     // Edited while out: these words no longer exist. Told to the caller, so
     // its finally asks again with the new text once this id is released.
     if ((editEpoch.get(m.id) ?? 0) !== (epochs.get(m.id) ?? 0)) return true;
-    // Nothing came back at all (a cooldown, a failed request): as the batch
-    // path does, the message may be asked again while nothing readable shows.
-    if (rows.size === 0 && !isRealTranslation(getTranslation(key))) qualityAttempted.delete(key);
-    const whole = joinParts(m.id, parts, seps, rows);
-    if (whole === null) {
-        logger.info(`[flush] ${m.id}: ${parts.length} parts, not all came back; the ≈ line stays`);
+    if (rows.size === 0) {
+        // Nothing came back at all (a cooldown, a hold, a failed request).
+        if (Date.now() < Math.max(planHeldUntil, pausedUntil)) {
+            if (!forced) holdMessages([m.id], base.targetLang, channelId);
+            else qualityAttempted.delete(key);
+        } else {
+            deferMessages([m.id], base.targetLang, channelId, forced);
+        }
         return false;
     }
-    if ("failed" in whole) return false;
+    const whole = joinParts(m.id, parts, seps, rows);
+    if (whole === null || "failed" in whole) {
+        logger.info(`[flush] ${m.id}: ${parts.length} parts, not all came back`);
+        omittedMessage(m.id, base.targetLang, channelId, forced);
+        return false;
+    }
     if (whole.skip) {
         // A forced skip never takes a readable line away (as in runTier).
-        if (!(base.force === true && isRealTranslation(getTranslation(key)))) writeResult(key, { skipped: true, via: engine });
+        if (!(base.force === true && isRealTranslation(getTranslation(key)))) writeResult(key, { skipped: true, via: ENGINE });
         return false;
     }
-    writeResult(key, { lang: whole.lang, text: whole.text, via: engine });
+    writeResult(key, { lang: whole.lang, text: whole.text, via: ENGINE });
     return false;
 }
 
@@ -4244,39 +4099,53 @@ async function runLongMessage(
  * quota every other message is waiting on, or hammer an engine that just
  * rejected us. Routed through `runTier()` itself — not a second call to
  * `transport.translateBatch` — so the write still lands through
- * `writeResult()`/`mayReplace()` exactly as an automatic quality batch does:
- * a Google result arriving later still cannot clobber what this bought.
+ * `writeResult()`/`mayReplace()` exactly as an automatic batch does.
+ *
+ * ⚡ ALWAYS GIVES A TRANSLATION (0.2.9, spec decision 3): the request is
+ * forced, so the relay translates it and never skips it. A press while an
+ * AUTOMATIC request for the same message is waiting in the batcher takes it
+ * out and sends the forced one instead; a press while that request is
+ * already out waits for it (forceAfterFlight) and sends the forced one when
+ * it settles without a line (a skip, a failure). A second press while a
+ * forced request is out sends nothing more.
  */
 async function forceQualityTranslate(message: Message): Promise<void> {
     const debug = settings.store.debugLogging;
     if (debug) logger.debug(`[force-quality] ${message.id}: click received`);
 
-    const engine = effectiveEngine();
-    // Not actually usable right now (no LLM configured, no key, or pinned to
-    // Google by an earlier auth failure) — the popover render() below already
-    // hides the button in exactly this case, but the engine can change
-    // between render and click, so check again rather than trust stale props.
-    if (!isLlmEngine(engine)) {
-        // ...unless this is an Automatic owner, where ⚡ asks for a ✦
-        // PREVIEW, one of the day's five.
-        // Checked after the engine, so an AI install pinned to Google by a
-        // rejected code still takes the branch below and gets its own error.
+    // ✦ is off (the popover render() below shows ⚡ only when it can do
+    // something, but the plan can change between render and click): an
+    // install with ⚡ left asks for one of the day's five, else nothing.
+    if (!aiOn()) {
         if (isAutomaticOnly()) {
             await previewPress(message);
             return;
         }
-        if (debug) logger.debug(`[force-quality] ${message.id}: blocked — no LLM engine usable right now`);
+        if (debug) logger.debug(`[force-quality] ${message.id}: blocked — ✦ is off for this account`);
         return;
     }
 
-    // A duplicate click, or a race with a request already in flight for this
-    // message on this tier (live chat, catch-up). One spend at a time per
-    // message, same discipline as the automatic paths.
-    if (inFlightQuality.has(message.id)) {
-        if (debug) logger.debug(`[force-quality] ${message.id}: blocked — already in flight on the quality tier`);
+    // A second press while this message's forced request is out: one spend
+    // at a time per message.
+    if (forcedInFlight.has(message.id)) {
+        if (debug) logger.debug(`[force-quality] ${message.id}: blocked — a forced request is already out`);
         return;
     }
-    if (debug) logger.debug(`[force-quality] ${message.id}: passed guards, spending a ${engine} request`);
+    if (inFlightQuality.has(message.id)) {
+        // Still waiting in the batcher's window: taken out, sent forced below.
+        if (qualityBatcher?.remove(message.id)) {
+            inFlightQuality.delete(message.id);
+        } else {
+            // Already out: wait for it, then force unless it brought a line.
+            if (debug) logger.debug(`[force-quality] ${message.id}: an automatic request is out; forcing when it settles`);
+            forceAfterFlight.set(message.id, message);
+            clearForcedHint(message.id);
+            forcedInFlight.add(message.id);
+            notifyForcedInFlight();
+            return;
+        }
+    }
+    if (debug) logger.debug(`[force-quality] ${message.id}: passed guards, spending a relay request`);
     inFlightQuality.add(message.id);
     // A hint left over from an EARLIER click on this same message must not
     // survive into this one — see clearForcedHint's own doc.
@@ -4332,7 +4201,7 @@ async function forceQualityTranslate(message: Message): Promise<void> {
     // failure gets. Success needs no report of its own: the store write is
     // what the accessory's ✦/≈ line already reacts to.
     try {
-        await runTier(engine, req, batcherGeneration, undefined, outcome => setForcedHint(message.id, outcome));
+        await runTier(req, batcherGeneration, undefined, outcome => setForcedHint(message.id, outcome));
     } finally {
         forcedInFlight.delete(message.id);
         notifyForcedInFlight();
@@ -4342,8 +4211,8 @@ async function forceQualityTranslate(message: Message): Promise<void> {
 /* ---------------------------------------------------- ✦ previews -- */
 
 /**
- * The ✦ previews this install has been shown: the FULL ✦ translation of one
- * message each, shown IN PLACE of its ≈ line with an "Add AI" link. Kept apart
+ * The ✦ previews this install has been shown (⚡ while ✦ is off): the FULL ✦
+ * translation of one message each, shown as its line. Kept apart
  * from the translation store on purpose: a preview is not an automatic
  * translation and must never be mistaken for one by catch-up or the cache.
  * Persisted (freePlan.ts), so a restart neither loses the line nor offers the
@@ -4383,8 +4252,7 @@ function previewTaken(message: Message): boolean {
 /**
  * Does this stored preview describe the message as it reads now, in the
  * reading language set now? A preview made in another reading language is
- * kept (switching back shows it again) but never shown in place of the
- * ≈ line of the new language. A row stored before the language was kept
+ * kept (switching back shows it again) but never shown for the new language. A row stored before the language was kept
  * has none, so it never matches.
  */
 function previewMatches(p: PreviewResult | undefined, message: Message): p is PreviewResult {
@@ -4392,10 +4260,10 @@ function previewMatches(p: PreviewResult | undefined, message: Message): p is Pr
 }
 
 /**
- * The preview to show for this message, if any: only on an Automatic install
- * (an AI subscriber's ✦ lines come from the store and carry no "Add AI"), and
+ * The preview to show for this message, if any: only while ✦ is off (with ✦
+ * on, every ✦ line comes from the store), and
  * only while the message still reads as it did when previewed. An edit makes
- * it stale: the ≈ line of the new text shows instead.
+ * it stale: nothing shows for the new text until it is pressed again.
  */
 function previewFor(message: Message): PreviewResult | undefined {
     if (!isAutomaticOnly()) return undefined;
@@ -4404,25 +4272,8 @@ function previewFor(message: Message): PreviewResult | undefined {
 }
 
 /**
- * Is this Google line one the plugin's own confidence logic says not to
- * trust? The SAME test the subtitle has always used for its "?" mark: a
- * detection Google itself was unsure of, or a normally non-Latin language
- * "detected" from Latin letters (see romanized.ts). Only ever true of a
- * Google line; an LLM result is never second-guessed here.
- */
-function googleUnsure(entry: { via: EngineId; lang: string; conf?: number }, content: string): {
-    unsure: boolean; romanized: boolean;
-} {
-    if (ENGINE_RANK[entry.via] !== 0) return { unsure: false, romanized: false };
-    const romanized = isRomanizedGuess(entry.lang, content);
-    const unsure = (entry.conf !== undefined && entry.conf < MIN_DETECT_CONFIDENCE) || romanized;
-    return { unsure, romanized };
-}
-
-/**
- * An Automatic owner's ✦ preview of this message, from ⚡ in the hover
- * toolbar (the ≈ line itself carries no control). Five a day, counted by the
- * relay once per message.
+ * An Automatic owner's ✦ preview of this message (✦ is off), from ⚡ in the
+ * hover toolbar. Five a day, counted by the relay once per message.
  *
  * Shows "⚡ translating…" at once (forcedInFlight), and a second press while
  * it is out, or after it is done, sends nothing. Charged only once the relay
@@ -4441,7 +4292,7 @@ async function previewPress(message: Message): Promise<void> {
     if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
     if (tasteExhausted()) {
         // Today's five are used, so a press would send nothing. Offer the
-        // one thing that does help, as the ⚡ "Add AI ✦" label does.
+        // one thing that does help, as the ⚡ "Subscribe" label does.
         tasteLog(`${id}: no preview, today's ${tasteCap()} are used`);
         openUpgrade();
         return;
@@ -4513,8 +4364,8 @@ async function sendPreview(message: Message, mySession: number): Promise<boolean
         return false;
     }
     // A cut preview (an older or rolled-back relay cuts previews to their
-    // first words) is never stored or shown as the full ✦ line. The ≈ line
-    // stays and the press is offered again, as joinParts does for a part.
+    // first words) is never stored or shown as the full ✦ line. The press is
+    // offered again, as joinParts does for a part.
     if (!r.skip && r.truncated === true) {
         tasteLog(`${message.id}: no preview (the relay sent a cut preview)`);
         return false;
@@ -4534,65 +4385,30 @@ async function sendPreview(message: Message, mySession: number): Promise<boolean
 }
 
 function rebuildBatcher() {
-    // Anything still sitting in either debounce window would otherwise be lost
-    // when dispose() clears it below. Drain BOTH before the generation bump.
-    const orphaned = [
-        ...(fastBatcher?.drainPending() ?? []),
-        ...(qualityBatcher?.drainPending() ?? [])
-    ];
+    // Anything still sitting in the debounce window would otherwise be lost
+    // when dispose() clears it below. Drain it before the generation bump.
+    const orphaned = qualityBatcher?.drainPending() ?? [];
 
-    const quality = effectiveEngine();
     batcherGeneration++;
     const myGeneration = batcherGeneration;
-    fastBatcher?.dispose();
     qualityBatcher?.dispose();
+    // A ⚡ press waiting for a request of the old generation: that request's
+    // answer is dropped (runTier), so the press is released here and may be
+    // pressed again.
+    for (const id of forceAfterFlight.keys()) forcedInFlight.delete(id);
+    forceAfterFlight.clear();
 
-    fastBatcher = createBatcher({
-        debounceMs: FAST_DEBOUNCE_MS,
-        maxBatch: FAST_MAX_BATCH,
-        contextSize: 8,
-        // Read from the engine table rather than hardcoded per tier: whether an
-        // engine can use conversation context is a fact about the ENGINE, and
-        // duplicating it here is how the table and the code that depends on it
-        // drift apart. (Google is per-message; context is wasted on it.)
-        supportsContext: ENGINE_CAPS.google.supportsContext,
-        targetLang: settings.store.targetLang,
-        onFlush: (req, channelId) =>
-            runTier("google", { ...req, patientRetries: !isLlmEngine(quality) }, myGeneration, channelId)
-    });
-
-    // Only when an LLM is actually configured AND usable. With engine=google
-    // there is no second tier at all and the fast tier is the whole plugin,
-    // exactly as before this change.
-    qualityBatcher = isLlmEngine(quality)
+    // ✦ ON: every message goes to the relay (0.2.9, the one tier). ✦ OFF:
+    // nothing is translated by itself; ⚡ asks for one message at a time.
+    qualityBatcher = aiOn()
         ? createBatcher({
-            // 20s while the fast tier is healthy; the fast tier's own window
-            // while it is cooling down. The 20s window's stated justification
-            // is "the reader does not wait on this: the fast tier has already
-            // put a subtitle on screen" (types.ts). While Google is parked on
-            // a 429 that premise is false — the LLM is the reader's ONLY
-            // translator, and holding its batch for 20s puts a felt, 20-second
-            // hole in a live conversation. Felt on 2026-08-26, with Google's
-            // endpoint IP-blocking this machine for days.
-            //
-            // The 429 storms the long window exists to prevent stay prevented
-            // by the rate gate: every quality flush still goes through
-            // acquireSlot, so a busy channel on the short window is throttled
-            // to the same requests-per-minute, just in smaller batches. That
-            // trades context quality and quota headroom for latency — the
-            // right trade in the one state where latency is all the reader
-            // has. Asked at arm time, so each burst picks its window from the
-            // fast tier's health at that moment.
-            debounceMs: () => isCoolingDown("google") ? FAST_DEBOUNCE_MS : QUALITY_DEBOUNCE_MS,
+            // Up to 3s and 25 messages a request (spec decision 7, types.ts).
+            debounceMs: QUALITY_DEBOUNCE_MS,
             maxBatch: QUALITY_MAX_BATCH,
             contextSize: 8,
-            // Same table, same reason. `quality` is narrowed to an LLM engine
-            // here, so this is `true` today — but it is true BECAUSE the engine
-            // says so, which is what makes adding a fourth engine one row in
-            // types.ts rather than a second place to remember.
-            supportsContext: ENGINE_CAPS[quality].supportsContext,
+            supportsContext: ENGINE_CAPS[ENGINE].supportsContext,
             targetLang: settings.store.targetLang,
-            onFlush: (req, channelId) => runTier(quality, req, myGeneration, channelId)
+            onFlush: (req, channelId) => runTier(req, myGeneration, channelId)
         })
         : null;
 
@@ -4600,15 +4416,9 @@ function rebuildBatcher() {
     // early-returns on that, which would silently drop every message caught
     // mid-debounce by a settings change — no entry, no marker, no retry.
     // Releasing the marks first is what makes the re-queue actually re-queue.
-    // Both sets, unconditionally: an orphan drained from fastBatcher's queue
-    // was only ever marked in inFlightFast and one from qualityBatcher's queue
-    // only in inFlightQuality, so releasing the set that was never set for a
-    // given id is simply a no-op — and a message queued in BOTH at once (fully
-    // legitimate under dual dispatch) needs both released anyway.
-    for (const m of orphaned) {
-        inFlightFast.delete(m.id);
-        inFlightQuality.delete(m.id);
-    }
+    for (const m of orphaned) inFlightQuality.delete(m.id);
+    // ✦ off: no ⏳ line may go on saying "translating…" (dropAllWaiting).
+    if (qualityBatcher === null) dropAllWaiting();
     // Re-queue under the new settings rather than marking them failed —
     // nothing about these messages failed, the settings changed under them.
     for (const m of orphaned) enqueue(m, false);
@@ -4674,9 +4484,8 @@ function readableContent(text: string, channelId: string): string {
  *
  * `recordContext` is false for exactly one caller: catch-up driven by a
  * scroll-back `LOAD_MESSAGES_SUCCESS` (see `initialHistoryPending`). Those
- * messages are translated by both tiers like any other (since 2026-09-20; they
- * used to be fast-only), but a locally-skipped one is not recorded as quality
- * CONTEXT: the context ring is a window on the conversation being read, and
+ * messages are translated like any other (since 2026-09-20), but none is
+ * recorded as CONTEXT: the context ring is a window on the conversation being read, and
  * filling it with an hour-old stretch of history the user happened to scroll
  * past would evict exactly the recent messages that make the next live batch
  * worth its request. `allowQuality` remains for the manual-⚡ and settings
@@ -4688,10 +4497,11 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     // The raw text, before the readable rewrite below, because that is what a
     // later MESSAGE_UPDATE carries and is compared with.
     rememberSeenText(pending.id, pending.text);
-    // Two flavours of local skip, handled identically: the structural one
-    // (own message, nothing translatable left after stripping emotes/links)
-    // and the linguistic one (we can tell locally that this is already in the
-    // target language — see detectLang.ts, which is heavily biased toward
+    // Two flavours of local skip, handled identically (0.2.9, decision 2:
+    // only when there is nothing to translate): the structural one (own
+    // message, nothing but emoji, links or laughter, see skip.ts) and the
+    // linguistic one (we can tell locally that this is already in the
+    // reader's language — see detectLang.ts, which is heavily biased toward
     // saying "no idea", i.e. toward spending the request).
     //
     // Both record context rather than writing a store entry, exactly as the
@@ -4712,7 +4522,6 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     // numeric id, so this cannot change whether a message is enqueued, only
     // what text it carries once it is.
     const readable = readableContent(pending.text, pending.channelId);
-    rememberEdgeMentions(pending.id, pending.text, pending.channelId, readable);
     if (readable !== pending.text) pending = { ...pending, text: readable };
 
     // P6 (field test 2026-10-08): EVERY message the reader sees is
@@ -4723,12 +4532,8 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     // reached the model without the message it answered. The ring keeps them
     // in message order and de-duplicates by id (batcher.ts).
     //
-    // Both rings: fastBatcher's is never actually read (it does not support
-    // context) but recording into it is harmless, and qualityBatcher may be
-    // null (Google-only). Not into the quality ring for scroll-back
-    // (recordContext false) or a call that keeps the quality tier out
+    // Not for scroll-back (recordContext false) or a call that keeps ✦ out
     // (allowQuality false); see this function's doc comment.
-    fastBatcher?.recordContext(pending);
     if (allowQuality && recordContext) qualityBatcher?.recordContext(pending);
 
     if (skipReason !== null) {
@@ -4746,25 +4551,13 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
         return;
     }
 
-    announceMissingKeyOnce();
-
     const key = makeKey(pending.id, settings.store.targetLang);
 
-    // Already queued or awaiting a response on that tier: the store shows a
-    // miss for the whole round trip, so "no entry" must not be read as
-    // "never requested". Checked and set per tier — a message is legitimately
-    // in flight on both at once.
-    let wentFast = false;
-    if (!inFlightFast.has(pending.id) && needsFast(key)) {
-        inFlightFast.add(pending.id);
-        fastBatcher?.add(pending);
-        wentFast = true;
-    }
-
+    // Already queued or awaiting a response: the store shows a miss for the
+    // whole round trip, so "no entry" must not be read as "never requested".
     let wentQuality = false;
     if (allowQuality && qualityBatcher && !inFlightQuality.has(pending.id) && needsQuality(key)) {
-        // An identical line already translated by the quality tier this
-        // session: reuse the answer rather than buying a second, possibly
+        // An identical line already translated by ✦ this session: reuse the answer rather than buying a second, possibly
         // different one. Still routed through writeResult, so it cannot
         // replace anything better and the beacon counts it like any other.
         // P7: only a line that carries its own meaning; see qualityPhrases.
@@ -4784,8 +4577,7 @@ function enqueue(pending: PendingMessage, isOwn: boolean, allowQuality = true, r
     }
 
     if (settings.store.debugLogging) {
-        const tiers = [wentFast && "fast", wentQuality && "quality"].filter(Boolean).join("+");
-        logger.debug(`[enqueue] ${pending.id}: -> ${tiers || "neither (in flight or already resolved)"}`);
+        logger.debug(`[enqueue] ${pending.id}: -> ${wentQuality ? "quality" : "nothing (in flight, already resolved, or ✦ off)"}`);
     }
 }
 
@@ -4809,7 +4601,7 @@ function localSkipReason(text: string, isOwn: boolean): LocalSkipReason | null {
     // Judge what the reader will actually get translated: a decoded code, or
     // fancy text normalised (decode.ts, normalize.ts).
     text = translatableText(text);
-    if (shouldSkip(text, isOwn)) return "shouldSkip";
+    if (shouldSkip(text, isOwn, settings.store.targetLang)) return "shouldSkip";
     if (isConfidentlyTargetLanguage(text, settings.store.targetLang)) return "isConfidentlyTargetLanguage";
     return null;
 }
@@ -4845,114 +4637,6 @@ function languageName(code: string): string {
     } catch {
         return code;
     }
-}
-
-/* ---------------------------------------------------- the mention case -- */
-
-/**
- * THE MENTION CASE (0.2.8, see mentionEdges.ts). Per message id, the words
- * Google is sent instead of the whole readable text, and the readable edge
- * mentions put back around its answer. `full` is the readable text this was
- * worked out for: a request carrying any other text (an edit) is sent whole.
- * Bounded: the oldest ids go first.
- */
-const edgeMentions = new Map<string, { full: string; core: string; lead: string; trail: string; }>();
-export const MAX_EDGE_MENTIONS = 2_000;
-
-function rememberEdgeMentions(id: string, raw: string, channelId: string, readable: string): void {
-    edgeMentions.delete(id);
-    try {
-        // A message written in a code is judged decoded, whole (decode.ts).
-        if (decodeMessage(raw) !== null) return;
-        const split = splitEdgeMentions(raw);
-        if (split === null) return;
-        const core = readableContent(split.core, channelId).trim();
-        if (core === "" || core === readable.trim()) return;
-        edgeMentions.set(id, {
-            full: readable,
-            core,
-            lead: split.lead === "" ? "" : readableContent(split.lead, channelId),
-            trail: split.trail === "" ? "" : readableContent(split.trail, channelId)
-        });
-        while (edgeMentions.size > MAX_EDGE_MENTIONS) {
-            const oldest = edgeMentions.keys().next();
-            if (oldest.done) break;
-            edgeMentions.delete(oldest.value);
-        }
-    } catch {
-        // Judged whole, as before.
-        edgeMentions.delete(id);
-    }
-}
-
-/** For tests: the message ids with remembered edge mentions, oldest first. */
-export function __edgeMentionIds(): string[] {
-    return [...edgeMentions.keys()];
-}
-
-/**
- * The edge mentions of a message as it was sent, if Google got its words
- * alone. The `full` check is defence in depth: every enqueue (an edit too)
- * works the entry out again before its text can be sent, so a request whose
- * text differs from the entry's is not reachable today; if it ever is, that
- * request is sent whole rather than with another text's words.
- */
-function edgesFor(m: { id: string; text: string; }) {
-    const e = edgeMentions.get(m.id);
-    return e !== undefined && e.full === m.text ? e : undefined;
-}
-
-/**
- * Google's request: each message with edge mentions carries its own words
- * only, so the language check (and the short-reply borrow in
- * withSourceLangs) judges the words, never the names.
- */
-function withoutEdgeMentions(req: BatchRequest): BatchRequest {
-    return {
-        ...req,
-        messages: req.messages.map(m => {
-            const e = edgesFor(m);
-            return e === undefined ? m : { ...m, text: e.core };
-        })
-    };
-}
-
-/**
- * Fill in `sourceLang` for the short messages Google cannot detect on their own.
- *
- * The motivating case, observed in a live German channel: "ne" replying to
- * "sind die gruppenräume klimatisiert an der uni?". Under `sl=auto` Google
- * reads "ne" as Hausa (confidence 0.217) and renders "it is" — the exact
- * opposite of the German "no" that was meant, and perfectly readable as an
- * answer, so nothing warns the reader. Pinning `sl=de` returns "no".
- *
- * Only SHORT texts borrow, and only from a parent that was itself detected
- * confidently. Both limits matter in a multilingual channel: a long message is
- * detected reliably on its own and must not be forced into its parent's
- * language, and borrowing from an uncertain parent would spread one bad
- * detection down a whole reply chain.
- *
- * Google-only by construction. The LLM engines already receive the surrounding
- * conversation, which resolves "ne" far better than a language code can.
- */
-function withSourceLangs(req: BatchRequest): BatchRequest {
-    const targetLang = req.targetLang;
-    return {
-        ...req,
-        messages: req.messages.map(m => {
-            if (m.sourceLang !== undefined) return m;
-            if (m.replyToId === undefined) return m;
-            if (m.text.trim().length > SHORT_TEXT_MAX) return m;
-
-            const parent = getTranslation(makeKey(m.replyToId, targetLang));
-            if (parent === undefined || !("lang" in parent)) return m;
-            // An undefined `conf` means the parent was itself pinned rather
-            // than detected, which is a borrow we already vouched for.
-            if (parent.conf !== undefined && parent.conf < MIN_DETECT_CONFIDENCE) return m;
-
-            return { ...m, sourceLang: parent.lang };
-        })
-    };
 }
 
 /**
@@ -5080,14 +4764,14 @@ function onMessageUpdate({ message }: { message: Message; }) {
     // sends the whole message for those, with the text unchanged; older
     // payloads carried no `content` at all. Neither is an edit: the
     // translation we have (or are waiting for) still fits these words, and
-    // dropping it would pay for every link message twice on both tiers.
+    // dropping it would pay for every link message twice.
     const text = message.content;
     if (typeof text !== "string") return;
     if (seenText.get(message.id) === text) return;
     rememberSeenText(message.id, text);
 
     // A real edit. Whatever we had cached describes the pre-edit text, so it
-    // is wrong now. The quality tier's spent attempt is discarded with it, for
+    // is wrong now. ✦'s spent attempt is discarded with it, for
     // the same reason: it was spent on text that no longer exists, so the
     // edited message is entitled to its own.
     invalidateMessage(message.id);
@@ -5097,7 +4781,6 @@ function onMessageUpdate({ message }: { message: Message; }) {
     // (see runTier), and a copy still waiting in a debounce window is taken
     // out so the new text is what gets sent.
     editEpoch.set(message.id, (editEpoch.get(message.id) ?? 0) + 1);
-    if (fastBatcher?.remove(message.id)) inFlightFast.delete(message.id);
     if (qualityBatcher?.remove(message.id)) inFlightQuality.delete(message.id);
     if (text === "") {
         lastEdit.delete(message.id);
@@ -5169,8 +4852,8 @@ interface CatchUpOptions {
     /**
      * True for a `LOAD_MESSAGES_SUCCESS` that is not the initial backlog
      * landing for a channel the user just opened, i.e. the user scrolling back
-     * through history. Those messages are translated by BOTH tiers like any
-     * other, but are not recorded as quality-tier context — see
+     * through history. Those messages are translated like any other, but are
+     * not recorded as context — see
      * `initialHistoryPending` for why the ring must stay a window on the
      * conversation being read.
      */
@@ -5179,9 +4862,8 @@ interface CatchUpOptions {
 
 function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     const { becomingFocused = false, scrollBack = false } = opts;
-    // Every catch-up may spend on the quality tier now; the flag only steers
-    // context. Kept as a local so the selection below reads the same as it did
-    // when scroll-back was excluded, and so a future exclusion is one line.
+    // Every catch-up may spend on ✦; the scroll-back flag only steers
+    // context. Kept as a local so a future exclusion is one line.
     const allowQuality = true;
 
     if (!channelActive(channelId)) return;
@@ -5229,32 +4911,18 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
 
         const key = makeKey(message.id, settings.store.targetLang);
 
-        // A message is finished only when NEITHER tier has anything left to do.
-        // Asking "is there an entry?" is no longer enough: the fast tier writes
-        // one within a second of every message arriving, so that question now
-        // answers "yes" for the entire backlog and the quality tier would never
-        // run again. Delegating to needsFast/needsQuality (rather than a coarse
-        // pre-filter on entry shape) is also what lets a GOOGLE skip stay open
-        // to the quality tier — Google echoes short/romanized text back
-        // unchanged and that reads as "already in the target language" when it
-        // actually means "Google gave up"; only an LLM's own skip closes a
-        // message. Each check folds in its own in-flight test, since a message
-        // can legitimately be in flight on one tier and idle on the other.
-        //
-        // needsQuality() ALSO folds in the one-request-per-message ledger, and
-        // this loop is why: catch-up runs on every channel open and on every
-        // scroll-up (LOAD_MESSAGES_SUCCESS), so without it a quality failure —
-        // which writes nothing, by design — would be re-requested here for the
-        // rest of the session. See `qualityAttempted`.
-        const fast = !inFlightFast.has(message.id) && needsFast(key);
-        // `allowQuality` first, so a scroll-back pass does not even SELECT a
-        // message whose only outstanding work is a quality upgrade: it would
-        // consume budget and then be enqueued for a tier that will not take it.
+        // A message is finished once ✦ has nothing left to do: needsQuality()
+        // folds in the one-request-per-verdict ledger, and this loop is why:
+        // catch-up runs on every channel open and on every scroll-up
+        // (LOAD_MESSAGES_SUCCESS), so without it a message the model left out
+        // twice would be re-requested here for the rest of the session. A ⏳
+        // message (no verdict yet) is given back its charge, so it is asked
+        // again here. See `qualityAttempted`.
         const quality = allowQuality
             && qualityBatcher !== null
             && !inFlightQuality.has(message.id)
             && needsQuality(key);
-        if (!fast && !quality) continue;
+        if (!quality) continue;
 
         candidates.push(message);
         // Still enqueued above (a skipped message is real conversation and
@@ -5281,17 +4949,19 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
     // enqueued and flushed below; the ring orders by message id and drops
     // duplicates, so the two catch-ups of one open record each line once.
     // Not for scroll-back: see enqueue()'s doc comment.
-    if (!scrollBack && allowQuality && qualityBatcher !== null) {
+    const ring = allowQuality ? qualityBatcher : null;
+    if (!scrollBack && ring !== null) {
         const queued = new Set(candidates.map(m => m.id));
         for (const message of all.slice(-CONTEXT_RING_SIZE)) {
             if (queued.has(message?.id) || typeof message?.id !== "string") continue;
             if (typeof message.content !== "string" || message.content.trim() === "") continue;
-            qualityBatcher.recordContext({
+            const line = {
                 id: message.id,
                 author: message.author?.username ?? "unknown",
                 text: readableContent(message.content, channelId),
                 channelId
-            });
+            };
+            ring.recordContext(line);
         }
     }
 
@@ -5312,22 +4982,11 @@ function catchUp(channelId: string, opts: CatchUpOptions = {}) {
         );
     }
 
-    // SEND NOW. Catch-up hands the batchers a backlog that is already complete;
+    // SEND NOW. Catch-up hands the batcher a backlog that is already complete;
     // the debounce window exists to group a burst of LIVE messages, and waiting
     // it out here only delayed the ✦ line on every channel open by the whole
-    // window (measured: 20s, then a second batch, then a gate token — over a
-    // minute from opening a channel to the upgrade).
-    //
-    // FAST FIRST, on purpose. Google answers in a few hundred milliseconds
-    // and the relay in seconds, so the ≈ line is normally on screen before
-    // the quality verdict lands — and runTier's ledger refund ("only while the
-    // reader is blind") reads the store at that moment. Sending the quality
-    // batch first would make a refused batch look like a blind reader every
-    // time, and re-spend on the same messages at the next channel open.
-    if (candidates.length > 0) {
-        fastBatcher?.flushNow();
-        if (allowQuality) qualityBatcher?.flushNow();
-    }
+    // window.
+    if (candidates.length > 0 && allowQuality) qualityBatcher?.flushNow();
 }
 
 function onChannelSelect({ channelId }: { channelId: string; }) {
@@ -5342,6 +5001,8 @@ function onChannelSelect({ channelId }: { channelId: string; }) {
     catchUp(channelId, { becomingFocused: true });
     // A 🌐 choice made on another computer for a channel not known here until now.
     void channelOpened(channelId);
+    // The ended panel waits for a channel switch (decision 12).
+    checkPlanMessages("switch");
 }
 
 // CHANNEL_SELECT fires before Discord has necessarily fetched the backlog
@@ -5381,10 +5042,9 @@ function onMessagesLoaded(payload: any) {
     // The FIRST load after a channel open is that open's own backlog — the
     // "tab back in after a game" case CHANNEL_SELECT was too early to serve.
     // Every load after it is the user scrolling back through history. Both get
-    // the quality tier (changed 2026-09-20: scroll-back used to be fast-only,
-    // a bound for a personal Gemini free-tier key that the relay now enforces
-    // server-side); only the context recording differs — see
-    // `initialHistoryPending`.
+    // ✦ (changed 2026-09-20: scroll-back used to be limited, a bound for a
+    // personal Gemini free-tier key that the relay now enforces server-side);
+    // only the context recording differs — see `initialHistoryPending`.
     catchUp(channelId, { scrollBack: !takeInitialHistory(channelId) });
 }
 
@@ -5399,23 +5059,13 @@ function translationDir(): "rtl" | "auto" {
 }
 
 /**
- * How each engine's output is announced on the subtitle itself.
- *
- * With the engine gone from the cache key, a subtitle no longer implicitly
- * means "produced by whatever is currently configured" — a Google line and a
- * Gemini line sit side by side in the same channel. The glyph is the reader's
- * only way to tell a context-aware translation from an approximate one, which
- * matters most exactly when it differs from what they configured.
- *
- * One lookup keyed by EngineId rather than per-engine literals scattered
- * through the renderer: adding a fourth engine is one row here, and it is
- * impossible for the glyph and the hover text to disagree about which engine
- * they describe.
+ * How each engine's output is announced on the subtitle itself: ✦, and the
+ * engine's name in the hover. One lookup keyed by EngineId, so the glyph and
+ * the hover text cannot disagree. 0.2.9 writes only relay lines; the
+ * bring-your-own-key rows are for lines an older build stored. There is no ≈
+ * any more (spec decision 1): Google's lines are dropped when the store loads.
  */
 const ENGINE_PROVENANCE: Record<EngineId, { glyph: string; label: string; }> = {
-    // ≈ — approximate: per-message, no conversation context.
-    google: { glyph: "≈", label: "Google Translate" },
-    // ✦ — context-aware: batched, with a rolling window of recent messages.
     claude: { glyph: "✦", label: "Claude" },
     gemini: { glyph: "✦", label: "Gemini" },
     groq: { glyph: "✦", label: "Groq" },
@@ -5470,38 +5120,17 @@ function forcedHintDisplay(hint: ForcedHint): { text: string; title: string } {
 }
 
 /**
- * "✦ ES · the leak says the album drops friday · Add AI": a ✦ preview, the
- * FULL ✦ translation, shown IN PLACE of the ≈ line (one line, never a second
- * one under it), with the "Add AI" link on that same line. When ✦ reads it
- * the same way ≈ did, this is still the line: its text simply replaces ≈.
- * See previewPress.
+ * "✦ ES · the leak says the album drops friday": a ⚡ translation while ✦ is
+ * off (one of the day's five), the FULL ✦ translation, as the message's one
+ * line. It looks like any ✦ line: nothing to buy on it (0.2.9 spec, decisions
+ * 6 and 12, "never sales text under a message"). See previewPress.
  */
 function previewLine(preview: PreviewResult) {
-    // P4: while a payment is on its way the link is plain words, not a buy link.
-    const addAi = isPaymentPending() ? (
-        <span style={{ color: "var(--text-muted)" }} data-subline-payment-pending="">
-            {" · "}{UPGRADE_COPY.paymentPending}
-        </span>
-    ) : (
-        <span style={{ color: "var(--text-muted)" }}>
-            {" · "}
-            <a
-                href={PRICING_URL}
-                target="_blank"
-                rel="noreferrer"
-                data-subline-preview-add-ai=""
-                onClick={(e: any) => { e?.preventDefault?.(); openUpgrade(); }}
-            >
-                {UPGRADE_COPY.previewLink}
-            </a>
-        </span>
-    );
     recordRendered();
     if (preview.text === null) {
         return (
             <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }} data-subline-preview="">
                 {UPGRADE_COPY.nothingToTranslate}
-                {addAi}
             </div>
         );
     }
@@ -5514,7 +5143,6 @@ function previewLine(preview: PreviewResult) {
                 {provenance.glyph}{label === null ? "" : ` ${label}`} ·{" "}
             </span>
             <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{preview.text}</span>
-            {addAi}
         </div>
     );
 }
@@ -5575,10 +5203,15 @@ function withDecodedLine(message: Message, lines: any) {
 /** Everything under a message except the decoded line. Hook-free; see TranslationAccessory. */
 function translationLines(message: Message) {
     // No engine component: whatever engine produced this line, this is where
-    // it is read from. That is what makes a Google-produced translation
-    // visible while an LLM engine is selected.
+    // it is read from.
     const key = makeKey(message.id, settings.store.targetLang);
-    const entry: StoredTranslation | undefined = getTranslation(key);
+    const stored = getTranslation(key);
+    // A line from an engine this build does not know (a Google line can only
+    // come from an older build, and the store drops those on load) is never
+    // shown: the message reads as having no entry.
+    const entry: StoredTranslation | undefined = isRealTranslation(stored) && !Object.prototype.hasOwnProperty.call(ENGINE_PROVENANCE, stored.via)
+        ? undefined
+        : stored;
 
     // A manual ⚡ click currently out for this message. Read AFTER the store
     // lookup above but used throughout below — this is the one thing in this
@@ -5592,17 +5225,17 @@ function translationLines(message: Message) {
     // when `forcing` is true, for exactly that reason.
     const hint = forcing ? undefined : forcedHintFor(message.id);
 
-    // An Automatic owner's ✦ preview REPLACES whatever line this message has
-    // (≈, a Google skip, a pending or failed ≈): one line, with "Add AI" on
-    // it. Only a real ✦ line from the store outranks it.
+    // A ⚡ translation while ✦ is off REPLACES whatever marker this message
+    // has (a skip, ⏳, ⚠): one line. Only a real ✦ line from the store
+    // outranks it.
     const preview = previewFor(message);
-    if (preview !== undefined && !(isRealTranslation(entry) && entry.via !== "google")) return previewLine(preview);
+    if (preview !== undefined && !(isRealTranslation(entry) && rankOf(entry.via) >= 1)) return previewLine(preview);
 
     if (!entry) {
         // Nothing to show yet — UNLESS a forced request is why: the reader
-        // clicked ⚡ on a message that had never been translated at all (no
-        // existing Google line to keep), and would otherwise see nothing
-        // happen until the response lands, possibly several seconds away.
+        // clicked ⚡ on a message that had never been translated at all, and
+        // would otherwise see nothing happen until the response lands,
+        // possibly several seconds away.
         if (forcing) {
             return (
                 <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
@@ -5611,8 +5244,7 @@ function translationLines(message: Message) {
             );
         }
         // Same reasoning, once the click has SETTLED without a store write —
-        // exactly the case a quality failure always produces (see runTier).
-        // Automatic failures leave this branch returning null, unchanged.
+        // exactly the case a failed forced request produces (see runTier).
         if (hint) {
             const { text, title } = forcedHintDisplay(hint);
             return (
@@ -5632,9 +5264,9 @@ function translationLines(message: Message) {
     // catch-up can tell "resolved, nothing to show" from "never requested", and
     // falling through would label a perfectly fine message "translation
     // failed". Same "nothing to show, but a forced click just changed that"
-    // exception as the no-entry branch above: `hasQualityVerdict()` still
-    // offers ⚡ on a Google-only skip (see forceQualityPopoverRender), so this
-    // is a real, reachable state, not a dead one.
+    // exception as the no-entry branch above: ⚡ is offered on a skipped
+    // message too (see forceQualityPopoverRender), so this is a real,
+    // reachable state, not a dead one.
     if ("skipped" in entry) {
         if (forcing) {
             return (
@@ -5668,9 +5300,11 @@ function translationLines(message: Message) {
     // current name, --text-normal the legacy one, and the literal is a
     // dark-theme-readable last resort if Discord renames it again.
     if ("failed" in entry) {
+        // The AI left this message out twice (runTier omittedMessage). Quiet,
+        // and recoverable: ⚡ asks again.
         return (
-            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}>
-                ⚠ translation failed
+            <div style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }} title={UPGRADE_COPY.failedTitle} data-subline-failed="">
+                {UPGRADE_COPY.failedLine}
                 {forcing && " · ⚡ translating…"}
                 {!forcing && hint && (
                     <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
@@ -5679,37 +5313,18 @@ function translationLines(message: Message) {
         );
     }
 
-    // A deferred message: the fast tier could not deliver, and the quality
-    // flush is ALREADY in flight — runTier fires it in the same breath that
-    // writes this marker (the reactive flushNow), and a message arriving
-    // during an established cooldown flushes on the fast window. Either way,
-    // by the time a reader sees this line, an engine is working on the
-    // message.
-    //
-    // The copy used to say "translation delayed — retrying", which describes
-    // a two-second wait as a failure. On a network where Google's endpoint
-    // throttles the shared IP (observed: Airtel CGNAT, both address
-    // families, blocked for curl with the plugin idle), EVERY message wore
-    // that line for the seconds before its ✦ — a permanent air of breakage
-    // over a pipeline that was working exactly as designed. Say what is
-    // actually happening; the tooltip keeps the detail.
+    // ⏳: ✦ got no answer about this message yet (no answer, a 5xx, a rate
+    // limit, the relay cooling down). It is asked again by itself (runTier,
+    // armDeferredRetry), so the line says so and nothing else: never blank
+    // with no sign, never an alarm (0.2.9).
     if ("deferred" in entry) {
-        // Two different truths, depending on configuration. With an LLM
-        // engine, the reactive flush has ALREADY fired by the time this marker
-        // renders, so "translating" is literally what is happening. With
-        // Google only, nothing is in flight: the message waits for Google's
-        // cooldown to lift and the next retry. Claiming "translating" there
-        // described a wait as work, and it sat on screen for minutes on a
-        // throttled network with no key configured.
-        const llmComing = isLlmEngine(effectiveEngine());
         return (
             <div
                 style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
-                title={llmComing
-                    ? "Google didn't answer, so ✦ is translating this message instead."
-                    : UPGRADE_COPY.googleBusy}
+                title={UPGRADE_COPY.waitingTitle}
+                data-subline-waiting=""
             >
-                {llmComing ? "⏳ translating…" : "⏳ waiting for the translator…"}
+                {UPGRADE_COPY.waitingLine}
                 {forcing && " · ⚡ translating…"}
                 {!forcing && hint && (
                     <span title={forcedHintDisplay(hint).title}> · {forcedHintDisplay(hint).text}</span>
@@ -5731,45 +5346,13 @@ function translationLines(message: Message) {
 
     // The prefix says both WHAT language this was and WHERE it came from. The
     // whole prefix stays on the muted token and the body on the --text-default
-    // chain — same split as before, just with the provenance glyph replacing
-    // the decorative ⤷. `title` spells the glyph out on hover, since a symbol
-    // alone can't teach its own meaning.
+    // chain. `title` spells the glyph out on hover, since a symbol alone can't
+    // teach its own meaning. No label at all for "und", "zxx" or anything
+    // that names no language.
     const provenance = ENGINE_PROVENANCE[entry.via];
-    // Google reports how sure it is about the language it detected, and on
-    // short replies it is often barely sure at all — "ne" came back as Hausa
-    // at 0.217 and was rendered as "it is", the opposite of the German "no"
-    // that was meant. A wrong translation reads exactly as fluently as a right
-    // one, so the only defence is to say which is which.
-    //
-    // Confidence alone misses the worst case: Google reported 1.00 confidence
-    // on romanized Moroccan Darija ("ana bghit nmchi l dar") while inverting a
-    // negation. Script mismatch — a normally non-Latin language detected from
-    // Latin-only text — is an independent signal that catches exactly that,
-    // regardless of what confidence was reported. Only Google's own lines are
-    // a script GUESS in the first place; an LLM result is never checked here.
-    const { unsure, romanized } = googleUnsure(entry, translatableText(message.content ?? ""));
-    // THE FREE PLAN SAYS IT IN WORDS. The same judgement as the "?" mark, and
-    // only that judgement: "≈ rough" appears exactly when the confidence logic
-    // above rates this Google line unreliable, never to make ≈ look worse
-    // than it is. A paid install keeps the "?" it always had.
-    const rough = unsure && isAutomaticOnly();
-    // The line itself offers nothing to press: an Automatic owner asks for a
-    // ✦ preview with ⚡ in the hover toolbar (forceQualityPopoverRender). A
-    // control on every ≈ line was noise: a channel of foreign messages showed
-    // one per message.
-    // No label at all for "und", "zxx" or anything that names no language.
     const label = languageLabel(entry.lang);
     const langName = label === null ? null : languageName(label);
-    const title = !unsure
-        ? `Translated by ${provenance.label}${langName === null ? "" : ` · ${langName}`}`
-        : romanized
-            ? `Translated by ${provenance.label}. This looks like ${langName ?? "a language"} `
-              + "written in Latin letters, which Google translates badly, "
-              + "often confidently and wrongly. "
-              + (rough ? UPGRADE_COPY.roughPreviewHint : "Wait for the ✦ line.")
-            : `Translated by ${provenance.label}. ${langName ?? "The language"} detected, but only `
-              + `${Math.round(entry.conf! * 100)}% confidently. Short messages are `
-              + "often misread, so this may be wrong.";
+    const title = `Translated by ${provenance.label}${langName === null ? "" : ` · ${langName}`}`;
 
     // SPEC §7 STEP 4, and the only thing this project accepts as proof the
     // install works: a translation reached the screen. Everything else the
@@ -5785,7 +5368,7 @@ function translationLines(message: Message) {
     return (
         <div style={{ fontSize: "0.95rem", color: TEXT_COLOUR, fontStyle: "italic" }}>
             <span style={{ color: "var(--text-muted)" }} title={title}>
-                {rough ? "≈ rough" : provenance.glyph}{label === null ? "" : ` ${label}`}{unsure && !rough ? "?" : ""} ·{" "}
+                {provenance.glyph}{label === null ? "" : ` ${label}`} ·{" "}
             </span>
             {/*
               * LINE BREAKS SHOW. A two-line message came back as two lines and
@@ -5794,21 +5377,17 @@ function translationLines(message: Message) {
               */}
             {/*
               * dir: the reader's language decides the direction, and [dir]
-              * isolates the text from the ≈/✦ prefix and the hints after it.
+              * isolates the text from the ✦ prefix and the hints after it.
               * "auto" for left-to-right targets, so a line that is still in
               * the source script takes its own direction.
               */}
             <span dir={translationDir()} style={TRANSLATION_TEXT_STYLE}>{cleanTranslation(entry.text.trim(), message.content ?? "")}</span>
             {/*
               * ALONGSIDE the line above, never instead of it — a forced click
-              * on a message that already carries a Google ≈ line (the common
-              * case: ⚡ exists specifically to upgrade one) must not take that
+              * on a message that already carries a line must not take that
               * readable line away while the request is out. Same muted token
-              * as the provenance prefix, so this reads as a continuation of
-              * it rather than a second, competing style. The settled-failure
-              * hint gets the identical treatment once the click comes back
-              * down — the ≈ line above is exactly what must never be taken
-              * away in exchange for a failure the reader cannot act on.
+              * as the provenance prefix. The settled-failure hint gets the
+              * identical treatment once the click comes back down.
               */}
             {forcing && (
                 <span style={{ color: "var(--text-muted)" }}> · ⚡ translating…</span>
@@ -5857,18 +5436,10 @@ const CHANNEL_TOGGLE_FAILED = "Couldn't save that. Try again.";
  * setting, no request involved) both in glyph — so the two are never confused
  * in the hover toolbar — and in what it does: a one-shot, per-MESSAGE spend.
  *
- * Hidden whenever it could not do anything useful:
- *  - no LLM is actually usable right now (`engine: "google"`, no key entered,
- *    or pinned to Google by an earlier auth failure — see `effectiveEngine()`)
- *    means there is no quality tier to force a message into at all;
- *  - the message already carries an LLM verdict (`hasQualityVerdict()`) — a
- *    real ✦ translation or an authoritative LLM skip — so another request
- *    could not improve on what is already there.
- *
- * Still shown for a message stuck on a `≈` Google line, however that
- * happened: scroll-back demoted it, the earlier automatic attempt failed and
- * `qualityAttempted` is refusing to retry it, or it simply has not been
- * reached yet. All three are exactly what this button exists to override.
+ * With ✦ on it is offered on EVERY message (decision 3: ⚡ always gives a
+ * translation): a press asks again, forced, even over a ✦ line or a skip.
+ * With ✦ off it is one of the day's five (a preview), hidden once ✦ has
+ * spoken for the message. Hidden with nothing paid for.
  */
 function forceQualityPopoverRender(message: Message) {
     const channel = ChannelStore.getChannel(message.channel_id);
@@ -5876,26 +5447,25 @@ function forceQualityPopoverRender(message: Message) {
 
     // Nothing paid for: nothing to press.
     if (!activated()) return null;
-    const engine = effectiveEngine();
-    // An Automatic owner gets the button too: a ✦ PREVIEW, one of the day's
-    // five, on any message (with or without a ≈ line).
-    const preview = !isLlmEngine(engine) && isAutomaticOnly();
-    if (!isLlmEngine(engine) && !preview) return null;
+    // ✦ off: a ✦ PREVIEW, one of the day's five, on any message.
+    const preview = !aiOn() && isAutomaticOnly();
+    if (!aiOn() && !preview) return null;
 
     const key = makeKey(message.id, settings.store.targetLang);
 
     if (preview) {
-        // An Automatic owner's preview: nothing to ask once ✦ has spoken.
-        // An AI subscriber keeps ⚡ on every message (below), even one ✦
-        // translated or skipped: pressing it asks again, forced.
-        if (hasQualityVerdict(key)) return null;
+        // A preview: nothing to ask once ✦ translated it. A ✦ skip is no
+        // answer to a reader who asks: ⚡ stays, and a press is forced. An AI
+        // subscriber keeps ⚡ on every message (below), even one ✦ translated.
+        if (hasQualityTranslation(key)) return null;
         // A new UTC day is a new five, so yesterday's "used up" never
         // outlives midnight on the button.
         if (rolloverTasteIfNewUtcDay()) void refreshEntitlement();
         if (tasteExhausted()) {
             // Today's five are used, so a press would send nothing. Offer the
-            // one thing that does help: the Add AI panel. While a payment is
-            // on its way, say that instead (P4); a press says what happens next.
+            // one thing that does help: the plan panel ("No AI translations
+            // left today · Subscribe", decision 6). While a payment is on its
+            // way, say that instead (P4); a press says what happens next.
             if (isPaymentPending()) {
                 return {
                     label: UPGRADE_COPY.paymentPending,
@@ -5927,29 +5497,20 @@ function forceQualityPopoverRender(message: Message) {
             }
         };
     }
-    if (!isLlmEngine(engine)) return null;
-
-    const { label } = LLM_ENGINES[engine];
-
     // Say what pressing this would actually do — the user should not have to
-    // look away at the chat-bar indicator (see QuotaIndicator below) to
-    // decide whether ⚡ is worth clicking right now, and the wording has to
+    // guess whether ⚡ is worth clicking right now, and the wording has to
     // stay honest when the answer is "nothing" (cooling down, or not ready).
     //
-    // Checked FIRST, ahead of the quota description: a request already out
-    // for THIS message (the same inFlightQuality guard forceQualityTranslate
-    // itself checks — automatic or a previous manual click) means a click
-    // right now does nothing at all, which outranks readiness. Without this a
-    // second click on a slow request was a silent no-op; see
-    // TranslationAccessory's own `⚡ translating…` line for the same state
-    // reflected on the message.
+    // Checked FIRST, ahead of the quota description: a forced request already
+    // out for THIS message (the same forcedInFlight guard forceQualityTranslate
+    // itself checks) means a click right now does nothing at all, which
+    // outranks readiness. See TranslationAccessory's own `⚡ translating…`
+    // line for the same state reflected on the message.
     //
-    // Matches QuotaIndicator's own wording for the same three states
-    // (ready / cooling / a wait) so the two can never disagree about what
-    // pressing ⚡ is about to do — see that component's docs for why a
-    // countdown, not a count, is the only number either of them shows.
-    const quota = describeQuotaState(engine);
-    const spendDescription = inFlightQuality.has(message.id)
+    // A countdown, not a count, is the only number it shows (ready /
+    // cooling / a wait): the ✦ button carries no number at all.
+    const quota = describeQuotaState(ENGINE);
+    const spendDescription = forcedInFlight.has(message.id)
         ? "already translating…"
         : quota.cooling
             ? `cooling down, ${formatCountdown(quota.remainingMs)} left`
@@ -5957,8 +5518,10 @@ function forceQualityPopoverRender(message: Message) {
                 ? "ready to send now"
                 : `not ready, ${formatCountdown(quota.remainingMs)} left`;
 
+    // And the plan state, as the ✦ button says it: where there is no message
+    // box (or the ✦ button is hidden), ⚡ is where the state shows.
     return {
-        label: `Translate with ${label} now (${spendDescription})`,
+        label: `Translate with AI now (${spendDescription}) · ${currentPlanView().hover}`,
         icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
         message,
         channel,
@@ -5969,169 +5532,103 @@ function forceQualityPopoverRender(message: Message) {
 }
 
 /**
- * The chat-bar quota indicator — "is ⚡ ready to send right now, and if not,
- * how long" — sitting next to the message input via Vencord's
- * `@api/ChatButtons` (`chatBarButton` below; see `src/api/ChatButtons.tsx` in
- * a Vencord checkout for the contract this implements).
+ * THE ✦ BUTTON in the message box (0.2.9 spec, decision 11): the one place
+ * that shows the plan state, in every state, next to the message input via
+ * Vencord's `@api/ChatButtons` (`chatBarButton` below).
  *
- * WHY THIS SHOWS READINESS, NOT A COUNT. It used to show this plugin's own
- * rate-gate token count — `✦ 3` — and a reader with no reason to know that
- * number was an internal pacing budget read it as "3 API calls remaining". On
- * a generous quota (Groq's free tier, 30 req/min) there is nothing to ration,
- * so the number was meaningless at best and actively misleading at worst: it
- * implied scarcity that was not real, from a figure the user could not spend
- * against anyway (⚡ enforces the real limits itself; the number was never
- * load-bearing for anything the user could do). A countdown is different —
- * it is the one number a reader can actually act on ("wait" vs. "don't") —
- * so that is the only number either this or the ⚡ label ever shows.
+ *  - On (a period, not started yet, subscribed, a buyer): VIBRANT. The ✦ is
+ *    a moving colour gradient with a glow that pulses, so the shine is
+ *    plain to see whether it is on or off. A reader who asked for less
+ *    motion (prefers-reduced-motion) gets the same colours and a still glow.
+ *  - Off: the same ✦, grey. Same box, same size in every state; no text and
+ *    no number on it (the hidden daily ceiling is never shown).
+ *  - The hover text says the state (planState.ts); a click opens the plan
+ *    panel (openUpgradeForLevel: the Link first when not linked).
  *
- * WHAT DECIDES READY VS. WAIT still legitimately depends on the engine, and
- * the tooltip says why. For Claude and Gemini, readiness depends only on this
- * plugin's own pacing, because those providers report nothing about their
- * side. For an engine that DOES report its remaining quota on every response
- * (Groq — see `providerRemainingFor`), a request has to clear BOTH real
- * limits, so the provider's own figure can still make this show "not ready"
- * even while the internal pacing has room — the defect `describeQuotaState`'s
- * docs describe, now expressed as readiness rather than as a count.
+ * Not drawn where Discord draws no buttons (a channel the reader cannot type
+ * in), and gone when the reader hides it (Vencord's right-click hide): then
+ * ⚡ and Subline → Settings say the state, and the one-time panels still
+ * come (they do not depend on this button).
  *
- * PRIORITY ORDER, exactly `describeQuotaState()`'s: cooling down (⚡ will not
- * work at all right now, however ready the pacing itself would otherwise say)
- * outranks a wait, which outranks nothing — rendering NOTHING is itself a
- * state: no LLM engine is configured, or one is but has no key, so there is
- * no quality tier to report readiness FOR at all, and a permanent indicator
- * would be noise rather than information. `effectiveEngine()` is what decides
- * that, so this also goes quiet for the third, less obvious case it already
- * covers — a key an engine has rejected this session (see `sessionFallback`)
- * — for the same reason: no request pressing ⚡ would send right now belongs
- * to a "quality tier" that, this session, does not exist.
- *
- * LIVE: neither the rate gate nor the cooldown store notifies on change (see
- * `rateGateAvailable()`'s and `cooldownUntil()`'s own docs — a read that
- * pushed updates would have to mutate state to schedule them, which is
- * exactly what a pure read must not do), so this component ticks itself,
- * once a second, for as long as it stays mounted — needed now more than ever,
- * since a live countdown (unlike a static count) is wrong the instant it
- * stops moving.
+ * LIVE: redrawn on every relay answer and payment change, and at the moment
+ * a running period ends (it turns grey then, with no answer needed), and
+ * once a minute for the days left.
  */
-function QuotaIndicator(_props: ChatBarProps & { isMainChat: boolean; isAnyChat: boolean; }) {
-    const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
+export const SPARK_CLASS = "subline-spark";
+
+/** The button's own style: drawn with it, so nothing outlives the plugin. */
+export const SPARK_CSS = `
+@keyframes subline-spark-flow { 0% { background-position: 0% 50%; } 100% { background-position: 200% 50%; } }
+@keyframes subline-spark-shine {
+  0%, 100% { filter: saturate(0.85) brightness(0.9) drop-shadow(0 0 1px rgba(255, 176, 32, 0.55)); }
+  50% { filter: saturate(0.85) brightness(0.95) drop-shadow(0 0 2.5px rgba(255, 79, 163, 0.6)); }
+}
+.${SPARK_CLASS} { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; font-size: 16px; line-height: 1; font-weight: 700; user-select: none; }
+.${SPARK_CLASS}-on {
+  background: linear-gradient(90deg, #ffb020, #ff4fa3, #a855f7, #38bdf8, #34d399, #ffb020);
+  background-size: 200% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+  animation: subline-spark-flow 3s linear infinite, subline-spark-shine 2.4s ease-in-out infinite;
+}
+.${SPARK_CLASS}-off { color: var(--interactive-normal, #b5bac1); opacity: 0.5; filter: grayscale(1); }
+@media (prefers-reduced-motion: reduce) {
+  .${SPARK_CLASS}-on {
+    animation: none;
+    filter: saturate(0.85) brightness(0.9) drop-shadow(0 0 1.5px rgba(255, 79, 163, 0.55));
+  }
+}
+`;
+
+/** The longest single wait for the end of a period (SparkButton): a day. */
+const SPARK_END_STEP_MS = 24 * 60 * 60_000;
+
+function SparkButton(props: ChatBarProps & { isMainChat: boolean; isAnyChat: boolean; }) {
+    const [, redraw] = React.useReducer((n: number) => n + 1, 0);
+    React.useEffect(() => subscribeEntitlement(redraw), []);
+    React.useEffect(() => subscribePaymentPending(redraw), []);
     React.useEffect(() => {
-        const id = setInterval(forceUpdate, 1_000);
+        const id = setInterval(redraw, 60_000);
         return () => clearInterval(id);
     }, []);
-
-    const engine = effectiveEngine();
-
-    const indicatorStyle = {
-        fontSize: "0.85rem",
-        color: "var(--text-muted)",
-        padding: "0 4px",
-        whiteSpace: "nowrap"
-    } as const;
-
-    /**
-     * A rejected key gets its OWN state rather than no indicator at all.
-     *
-     * `effectiveEngine()` reports google once the pin is set, so this component
-     * used to return null here — removing the only on-screen sign of the LLM
-     * tier at precisely the moment something was wrong with it. The subtitles
-     * kept appearing (Google still answers), so nothing looked broken; the
-     * upgrade simply never came, with no way to find out why short of reading
-     * the beacon file.
-     */
-    const configured = settings.store.engine as EngineId;
-    if (sessionFallback && isLlmEngine(configured)) {
-        return (
-            <div
-                style={indicatorStyle}
-                title={
-                    configured === "relay"
-                        // The Subline relay: plain words, no internal parts named.
-                        ? fallbackKind === "blocked"
-                            ? "✦ can't connect right now. Showing ≈."
-                            : "Your Subline code wasn't accepted. Showing ≈. Check it in Subline → Settings."
-                        : fallbackKind === "blocked"
-                        ? `Subline could not reach ${LLM_ENGINES[configured].label} from this network. A VPN, `
-                          + "region or ISP is refusing the connection. "
-                          + "Your API key is not the problem. "
-                          + "Google is being used meanwhile."
-                        : `${rejectedCredentialText(configured)}, so Subline is using Google. `
-                          + "Correct the key in settings and the "
-                          + "better translations resume. No restart needed."
-                }
-            >
-                {fallbackKind === "blocked"
-                    ? "✦ blocked"
-                    : configured === "relay" ? "✦ code rejected" : "✦ key rejected"}
-            </div>
-        );
-    }
-
-    if (!isLlmEngine(engine)) return null;
-
-    const { label } = LLM_ENGINES[engine];
-    // On the Subline relay the reader knows ✦, not the parts behind it.
-    const name = engine === "relay" ? "✦" : label;
-    const quota = describeQuotaState(engine);
-
-    if (quota.cooling) {
-        const countdown = formatCountdown(quota.remainingMs);
-        return (
-            <div
-                style={indicatorStyle}
-                title={
-                    `${name} is cooling down after a rate limit. ⚡ sends nothing for another ${countdown}.`
-                }
-            >
-                ✦ {countdown}
-            </div>
-        );
-    }
-
-    if (quota.ready) {
-        return (
-            <div
-                style={indicatorStyle}
-                title={
-                    `${name} is ready. ⚡ sends right away.`
-                }
+    const view = currentPlanView();
+    // A running period turns grey the moment it ends, not up to a minute later.
+    // However far off the end is (a promo's 30 days are past what one timer
+    // can wait), timers of at most a day are chained up to it, so a button
+    // drawn on day 1 and kept open still redraws at the end itself.
+    const endsAt = view.on ? getEntitlement()?.access?.endsAt : undefined;
+    React.useEffect(() => {
+        if (endsAt === undefined) return;
+        let id: ReturnType<typeof setTimeout> | undefined;
+        const arm = () => {
+            const wait = endsAt - Date.now();
+            if (wait < 0) return;
+            const step = wait + 50;
+            id = step > SPARK_END_STEP_MS ? setTimeout(arm, SPARK_END_STEP_MS) : setTimeout(redraw, step);
+        };
+        arm();
+        return () => clearTimeout(id);
+    }, [endsAt]);
+    // The edit box and other small bars: only the main and side message boxes.
+    if (props?.isAnyChat === false) return null;
+    return (
+        <ChatBarButton tooltip={view.hover} onClick={() => openUpgradeForLevel()}>
+            <style>{SPARK_CSS}</style>
+            <span
+                className={`${SPARK_CLASS} ${SPARK_CLASS}-${view.on ? "on" : "off"}`}
+                data-subline-spark={view.on ? "on" : "off"}
+                aria-hidden="true"
             >
                 ✦
-            </div>
-        );
-    }
-
-    // Not cooling, not ready: SOMETHING would refuse the request right now —
-    // either this plugin's own pacing or (for an engine that reports its own
-    // quota) the provider itself. `source` says which, so the explanation is
-    // never a guess and never the wrong one: plainly this plugin's own pacing
-    // when it is the plugin's own pacing, plainly the provider's own stated
-    // quota when the provider itself is what is holding things up — that
-    // second case is exactly the one the old `✦ N` presentation used to get
-    // wrong, showing a plugin-budget number while the provider was the real
-    // reason a request would fail.
-    const countdown = formatCountdown(quota.remainingMs);
-    const why = engine === "relay"
-        ? quota.source === "provider" ? "✦ has no requests left right now" : "✦ is pacing itself to stay within safe limits"
-        : quota.source === "provider"
-            ? `${label} itself reports no requests left in its current window`
-            : `Subline is pacing requests to ${label} to stay within safe usage limits`;
-
-    return (
-        <div
-            style={indicatorStyle}
-            title={`${why}. ⚡ sends nothing for another ${countdown}.`}
-        >
-            ✦ {countdown}
-        </div>
+            </span>
+        </ChatBarButton>
     );
 }
-
 
 /* ------------------------------------------------------------ surfaces -- */
 
 /*
- * TEXT OUTSIDE MESSAGES, FOR PAID INSTALLS. Custom statuses, bios, embeds,
+ * TEXT OUTSIDE MESSAGES, WHILE ✦ IS ON. Custom statuses, bios, embeds,
  * polls, reply and forward previews, and the open channel's topic, thread
  * title, tags and live event. See surfaces/ for the cache, the batching
  * service and the components; this section is the wiring into the plugin's
@@ -6152,31 +5649,29 @@ let surfaceBudget: SurfaceBudget | null = null;
 export const SURFACE_ACCESSORY_ID = "VcTranslateSurfaces";
 
 /**
- * An install that has paid for surfaces: Automatic or AI, with the setting
- * on. Automatic gets Google (≈) on every surface, tight ones in place too;
- * AI also gets ✦ (see surfaceQualityAllowed). An install with nothing gets
- * Discord exactly as it was.
+ * Surfaces are translated while ✦ is on (0.2.9: there is no Google ≈ for an
+ * install whose ✦ is off), with the setting on. Anything else gets Discord
+ * exactly as it was.
  */
 function isPaidSurfaceUser(): boolean {
     if (surfaceService === null) return false;
     if (settings.store.translateSurfaces === false) return false;
-    return activated();
+    return aiOn();
 }
 
 /**
- * Names and pronouns (0.2.8): any plan, Automatic or AI, with the "Names and
- * pronouns" setting on. Its own setting, not the surfaces one. Nothing at all
- * without a plan.
+ * Names and pronouns (0.2.8): while ✦ is on, with the "Names and pronouns"
+ * setting on. Its own setting, not the surfaces one.
  */
 function isNamesUser(): boolean {
     if (surfaceService === null) return false;
     if (settings.store.translateNames === false) return false;
-    return activated();
+    return aiOn();
 }
 
-/** Whether surfaces may ask the relay (✦): only with AI and a working relay tier. */
+/** Whether surfaces may ask the relay (✦): only while ✦ is on. */
 function surfaceQualityAllowed(): boolean {
-    return effectiveEngine() === "relay";
+    return aiOn();
 }
 
 function surfaceDebug(message: string): void {
@@ -6184,101 +5679,76 @@ function surfaceDebug(message: string): void {
 }
 
 /**
- * One surface batch through the same engines, credential, cooldowns and rate
+ * One surface batch through the same relay, credential, cooldowns and rate
  * gate as messages, with NO conversation context. Surface requests count
- * against the same paid daily allowance on the relay (they are ordinary relay
+ * against the same daily ceiling on the relay (they are ordinary relay
  * requests). Any refusal is quiet: `null` ("not now") and the cooldown the
  * message pipeline would also have recorded. Never a toast.
  */
-async function translateSurfaceBatch(tier: SurfaceTier, texts: string[], options?: SurfaceSendOptions): Promise<SurfaceOutcome> {
-    const engine: EngineId = tier === "fast" ? "google" : "relay";
-    // A Google cooldown pauses every surface: whatever capacity is left then
-    // belongs to the conversation. A relay cooldown pauses ✦ only. ≈ goes on
-    // (P9: a relay that is down or rate-limited never takes ≈ off profiles
-    // and embeds; it costs the relay nothing).
+async function translateSurfaceBatch(texts: string[], options?: SurfaceSendOptions): Promise<SurfaceOutcome> {
     // "busy" for every refusal BEFORE anything is sent: it costs the
     // surfaces no per-minute slot and is asked again in seconds (see
     // SurfaceOutcome). `null` is kept for a request that went out.
-    if ((!isPaidSurfaceUser() && !isNamesUser()) || isCoolingDown("google") || (engine === "relay" && isCoolingDown("relay"))) return "busy";
-    // Surfaces' OWN Google cooldown: a 429 on a burst of statuses must never
-    // park the ≈ line under messages (see the 429 branch below).
-    if (engine === "google" && Date.now() < surfaceGoogleCooldownUntil) return "busy";
-    if (engine === "relay") {
-        // MESSAGES FIRST. A surface request takes a rate-gate slot only when
-        // no message batch is queued or waiting, never queues for one, and
-        // leaves two slots free, so even a second message batch right after
-        // does not wait.
-        if (inFlightQuality.size > 0 || !tryAcquireIdleSlot(2)) return "busy";
-    }
+    if ((!isPaidSurfaceUser() && !isNamesUser()) || !surfaceQualityAllowed()) { surfaceDebug("[surface] held: no AI, or both settings off"); return "busy"; }
+    // The relay cooling down or held (a refusal about the plan, the daily
+    // ceiling): messages wait too, so surfaces do not ask either.
+    if (Date.now() < relayWaitUntil()) { surfaceDebug("[surface] held: the relay asked to wait"); return "busy"; }
+    // MESSAGES FIRST. A surface request takes a rate-gate slot only when no
+    // message request is out or waiting at the gate, never queues for one,
+    // and leaves two slots free, so even a second message batch right after
+    // does not wait. Messages still in the batcher's window do not hold it
+    // (see qualityRequestsOut).
+    if (qualityRequestsOut > 0 || !tryAcquireIdleSlot(2)) { surfaceDebug(`[surface] held: messages first (${qualityRequestsOut} out, or no free slot)`); return "busy"; }
     const req: BatchRequest = {
         // Custom emoji never go out (customEmoji.ts). A bio's key is its raw
         // text, so this is where they are taken out.
         messages: texts.map((text, i) => ({ id: `s${i}`, author: "", text: dropCustomEmoji(text) })),
         context: [],
         targetLang: settings.store.targetLang,
-        ...(engine === "google" ? { maxConcurrency: 1 } : {}),
         // A ✦ click on a name: the relay translates it, never skips it.
-        ...(engine === "relay" && options?.force === true ? { force: true as const } : {})
+        ...(options?.force === true ? { force: true as const } : {})
     };
-    if (engine === "relay" && !surfaceQualityAllowed()) return "busy";
     let res: Awaited<ReturnType<typeof transport.translateBatch>>;
     try {
-        const install = engine === "relay" ? tasteBearer(await installIdOnce()) : undefined;
-        res = await transport.translateBatch(
-            engine,
-            engine === "relay" ? apiKeyFor("relay") : "",
-            JSON.stringify(req),
-            modelFor(engine),
-            settings.store.debugLogging,
-            install
-        );
+        const { credential, install } = await relayCredentials();
+        res = await transport.translateBatch(ENGINE, credential, JSON.stringify(req), "", settings.store.debugLogging, install);
     } catch {
         return null;
     }
     if (!res.ok) {
-        surfaceDebug(`[surface] ${engine}: not ok (${beaconErrorCode(res)})`);
-        if (engine === "relay" && isEntitlementRefusal(res.errorCode)) {
+        surfaceDebug(`[surface] relay: not ok (${beaconErrorCode(res)})`);
+        if (res.errorCode === "ai_paused") {
+            // The hidden daily ceiling: the same hold and notice as messages.
+            pausedUntil = Date.now() + (typeof res.retryAfterMs === "number" && res.retryAfterMs > 0 ? res.retryAfterMs : DEFAULT_COOLDOWN_MS);
+            showPausedNotice();
+        } else if (isEntitlementRefusal(res.errorCode)) {
+            planHeldUntil = Date.now() + PLAN_REFUSAL_HOLD_MS;
             refreshAfterRefusal();
-        } else if (engine === "relay") {
-            if (res.retryAfterMs) {
-                enterCooldown("relay", res.retryAfterMs, res.quotaLimitPerMinute, res.quotaModel, res.error);
-            } else if (/\b403\b/.test(res.error)) {
-                fallBackToGoogle(`cannot reach ${LLM_ENGINES.relay.label} from this network`, "blocked");
-            } else if (/\b401\b/.test(res.error)) {
-                fallBackToGoogle(rejectedCredentialText("relay"), "key");
-            }
-        } else if (/\b429\b/.test(res.error)) {
-            surfaceGoogleCooldownUntil = Date.now() + (res.retryAfterMs ?? GOOGLE_COOLDOWN_MS);
+        } else if (res.retryAfterMs) {
+            enterCooldown(ENGINE, res.retryAfterMs, res.quotaLimitPerMinute, res.error);
+        } else if (/\bHTTP 401\b/.test(res.error)) {
+            refreshAfterRefusal();
         }
         return null;
     }
-    if (engine === "relay") relayFailing = false;
+    relayFailing = false;
     const byId = new Map(res.results.map(r => [r.id, r]));
     return texts.map((_, i) => {
         const r = byId.get(`s${i}`);
         if (r === undefined || "failed" in r) return "fail";
-        // Google below its confidence gate is not a verdict: "unsure" caches
-        // nothing and leaves ✦ to decide (see SurfaceService.flush). Neither
-        // is "same" (Google handed the text back unchanged): that is Google
-        // giving up on romanized text, exactly as the message pipeline reads
-        // it, so a romanized bio or status still gets its ✦ turn. Only a
-        // "target" skip (already in the reader's language) is a verdict.
-        if (r.skip) return r.reason === "unsure" || r.reason === "same" ? "unsure" : "skip";
+        if (r.skip) return "skip";
         if (r.truncated) return "fail";
-        return r.conf === undefined ? { lang: r.lang, text: r.text } : { lang: r.lang, text: r.text, conf: r.conf };
+        return { lang: r.lang, text: r.text };
     });
 }
 
 /**
  * P9: the last relay request for messages got no answer (down, timed out, a
- * 5xx, malformed). Surfaces read it through `qualityPaused`, so a status or
- * a title shows ≈ instead of nothing while the relay is down. Cleared by the
- * next relay answer, from messages or surfaces.
+ * 5xx, malformed). Surfaces read it through `qualityPaused`, so no ✦ click
+ * is offered on a name while the relay is down. Cleared by the next relay
+ * answer, from messages or surfaces.
  */
 let relayFailing = false;
-
-/** Until when surfaces may not ask Google (their own 429). Messages' ≈ has its own cooldown. */
-let surfaceGoogleCooldownUntil = 0;
 
 function startSurfaces(): SurfaceService {
     surfaceCache = new SurfaceCache({
@@ -6295,9 +5765,9 @@ function startSurfaces(): SurfaceService {
         isPaid: isPaidSurfaceUser,
         namesAllowed: isNamesUser,
         qualityAllowed: surfaceQualityAllowed,
-        qualityPaused: () => relayFailing || isCoolingDown("relay"),
+        qualityPaused: () => relayFailing || Date.now() < relayWaitUntil(),
         targetLang: () => settings.store.targetLang,
-        locallySkipped: text => shouldSkip(text, false) || isConfidentlyTargetLanguage(text, settings.store.targetLang),
+        locallySkipped: text => shouldSkip(text, false, settings.store.targetLang) || isConfidentlyTargetLanguage(text, settings.store.targetLang),
         translate: translateSurfaceBatch,
         cache: surfaceCache,
         budget: surfaceBudget,
@@ -6548,19 +6018,14 @@ function ReplyQuoteImpl({ original, referenced }: { original: unknown; reference
     // and emoji look as they do in the original.
     const render = (translation: string) =>
         renderWithMarkup(translation, markup.tokens, text => Parser.parse(text, true, { channelId }), content);
-    const existing = getTranslation(makeKey(quoted.id, settings.store.targetLang));
+    const stored = getTranslation(makeKey(quoted.id, settings.store.targetLang));
+    // A line from an engine this build does not know (an older build's
+    // Google line) is never shown, here either: read as no line.
+    const existing = isRealTranslation(stored) && !Object.prototype.hasOwnProperty.call(ENGINE_PROVENANCE, stored.via) ? undefined : stored;
     if (existing !== undefined && "skipped" in existing) return decoded ?? fallback;
     // Already in the reader's language (a ⚡ answer): the original stays.
     if (isRealTranslation(existing) && existing.same === true) return decoded ?? fallback;
     if (isRealTranslation(existing)) {
-        // The message's own line says "≈ rough" for a Google guess it cannot
-        // trust (romanized text, a low-confidence detection). In place there
-        // is no room for that mark, so the guess is not shown at all: the
-        // original stays. Returned here, not passed to TightSwap, which would
-        // show the same cached guess.
-        if (existing.via === "google" && googleUnsure(existing, translatableText(content)).unsure) {
-            return decoded ?? fallback;
-        }
         const shown = render(existing.text.trim());
         if (shown === null || shown === undefined) return fallback;
         const glyph = ENGINE_PROVENANCE[existing.via].glyph;
@@ -6632,13 +6097,46 @@ function isLoadedInChannel(channelId: string, messageId: string): boolean {
     }
 }
 
-/** Lines under an onboarding question: the question and its options. */
+/**
+ * Set the first time Discord renders an option card through the card patch
+ * (onboardingOptionLines), for the rest of the session: the cards carry
+ * their options' lines, so the heading does not.
+ */
+let onboardingCardsSeen = false;
+
+/**
+ * Lines under an onboarding question: the question's own line, then the
+ * options whose original is not next to them, each with that original
+ * (surfaces/extract.ts onboardingHeadingTexts). Discord renders the option
+ * cards after this, in the same pass, so whether the card patch is live is
+ * known only once that pass is committed: until then the cards are taken as
+ * live, so a working card patch never shows an option twice, not even for a
+ * frame. If no card reported by then (Discord moved the card), every option
+ * shows here instead. Asked again for each question shown (by its id).
+ */
 function OnboardingLinesImpl({ prompt }: { prompt: unknown; }) {
+    const id = typeof (prompt as any)?.id === "string" ? (prompt as any).id as string : "";
+    const [committedFor, setCommittedFor] = React.useState<string | null>(null);
+    React.useEffect(() => { setCommittedFor(id); }, [id]);
     if (!isPaidSurfaceUser()) return null;
-    const texts = onboardingPromptTexts(prompt);
-    return texts.length === 0 ? null : <SurfaceLines texts={texts} />;
+    const { lines, pairs } = onboardingHeadingTexts(prompt, onboardingCardsSeen || committedFor !== id);
+    if (lines.length === 0 && pairs.length === 0) return null;
+    return (
+        <>
+            {lines.length > 0 && <SurfaceLines texts={lines} />}
+            {pairs.length > 0 && <SurfaceLines texts={pairs} withOriginal />}
+        </>
+    );
 }
 const OnboardingLines = safe("onboarding lines", OnboardingLinesImpl, surfaceDebug);
+
+/** Lines inside one option card, under its title and description. */
+function OnboardingOptionLinesImpl({ option }: { option: unknown; }) {
+    if (!isPaidSurfaceUser()) return null;
+    const texts = onboardingOptionTexts(option);
+    return texts.length === 0 ? null : <SurfaceLines texts={texts} />;
+}
+const OnboardingOptionLines = safe("onboarding option lines", OnboardingOptionLinesImpl, surfaceDebug);
 
 /* ------------------------------------------------- names and pronouns -- */
 
@@ -6785,6 +6283,14 @@ export default definePlugin({
         if (!isPaidSurfaceUser()) return heading;
         return [heading, <OnboardingLines key="subline-surface" prompt={prompt} />];
     }),
+    // Inside each option card, after its title and description. Called for
+    // every card Discord renders, so it also tells the heading the card patch
+    // is live (before any other check: that is about the patch, not the plan).
+    onboardingOptionLines: guard("onboardingOptionLines", "null", () => "onboarding", (option: unknown) => {
+        onboardingCardsSeen = true;
+        if (!isPaidSurfaceUser() || option === null || typeof option !== "object") return null;
+        return <OnboardingOptionLines key="subline-surface" option={option} />;
+    }),
     // The profile custom status: the translation IN PLACE of the status text
     // inside Discord's bubble, with a toggle at its end (see the patch). The
     // status string itself for anyone not paid, for the reader's own status
@@ -6836,10 +6342,10 @@ export default definePlugin({
     // chat-bar button this plugin registers, so it needs no second, manual
     // registration through the lower-level `@api/ChatButtons` functions;
     // PluginManager registers and unregisters this field itself, exactly as
-    // it does `messagePopoverButton` below.
+    // it does `messagePopoverButton` below. The ✦ plan button (SparkButton).
     chatBarButton: {
         icon: () => <span style={{ fontSize: "1rem" }}>✦</span>,
-        render: QuotaIndicator
+        render: SparkButton
     },
 
     messagePopoverButton: {
@@ -6894,6 +6400,8 @@ export default definePlugin({
         previewLedgerLoaded = false;
         previewLedgerReady = loadPreviewLedger(previews).finally(() => { previewLedgerLoaded = true; });
         try { (globalThis as any)[BROWSER_LINK_SWITCH] = useBrowserLinkForTest; } catch { /* the test switch only */ }
+        // Funnel steps for the owner page (events.ts): this account's install id, or nothing.
+        setEventSource(eventCredentials);
         // Every Activate / Add AI link opens the right panel while the plugin runs.
         registerUpgradeOpener(openUpgradeForLevel, openCodeEntryOrLink, linkFromSettings, { move: startMove, canMove: canMovePlan, finish: finishMoveFromSettings, canFinish: canFinishMove });
         unsubscribePanels?.();
@@ -6966,11 +6474,8 @@ export default definePlugin({
         updateWatch = createUpdateWatch({
             runningBuildId: BUILD_ID,
             readStagedBuildId: () => transport.readStagedBuildId(),
-            onUpdateStaged: () => showNotice(
-                "Subline updated in the background. Restart Discord to load the new version.",
-                "Restart Discord",
-                relaunch
-            ),
+            readStagedVersion: () => transport.readStagedVersion(),
+            onUpdateStaged: showUpdateNotice,
             intervalMs: UPDATE_CHECK_INTERVAL_MS,
             setInterval: (fn, ms) => setInterval(fn, ms),
             clearInterval: handle => clearInterval(handle as ReturnType<typeof setInterval>)
@@ -7026,6 +6531,16 @@ export default definePlugin({
         // answer and asks the relay. Discord may not know the user yet at
         // this point; then CONNECTION_OPEN does it, and until then nothing is
         // owned.
+        // The plan messages (once each): on from here, with what this
+        // computer was already shown. Read before the first relay answer.
+        planMessagesOn = true;
+        planStartChecked = false;
+        listenForTyping(true);
+        try {
+            updatePanelShown = (await DataStore.get<unknown>(UPDATE_PANEL_KEY)) === true;
+        } catch {
+            updatePanelShown = false;
+        }
         const signedIn = signedInUserId();
         if (signedIn !== null) await followAccount(signedIn);
         startEntitlementClock();
@@ -7052,10 +6567,10 @@ export default definePlugin({
         // what RATE the first batches of the session are allowed to go out.
         // Reading it late would let the session's opening burst leave under the
         // untaught defaults at a rate this project's quota has already been
-        // proven not to allow — the 429 (and the toast) seconds after every
-        // restart that persisting the learned quota exists to stop. Nothing
-        // below this line can flush before it resolves: the batchers and the
-        // Flux subscriptions are both built after it.
+        // proven not to allow — the 429 seconds after every restart that
+        // persisting the learned quota exists to stop. Nothing below this line
+        // can flush before it resolves: the batcher and the Flux subscriptions
+        // are both built after it.
         await loadRateGateTuning();
 
         // Deliberately NOT awaited: a slow IndexedDB read must not hold up the
@@ -7064,15 +6579,13 @@ export default definePlugin({
         // a miss, exactly as before this phase), never to a broken plugin.
         const cacheReady = loadPersistedTranslations();
 
+        running = true;
         rebuildBatcher();
         lastSeenCode = savedCode();
         onSettingsChanged(() => {
             // An account switch swapping in the next account's code: not a
             // change made here (enterAccount rebuilds and asks the relay).
             if (swappingCodeFields) return;
-            // Order matters: lift a stale pin BEFORE rebuilding, so the new
-            // batcher is built for the engine the user now has credentials for.
-            releaseFallbackIfCredentialChanged();
             onTargetLangMaybeChanged();
             // A different code is a different account: the relay is asked
             // again what this install owns, and the screen is redrawn. A code
@@ -7110,20 +6623,17 @@ export default definePlugin({
         // whole visible backlog, which is the exact spend persistence exists to
         // remove. start() still returns without waiting on it.
         void cacheReady.then(() => {
-            // stop() may have run while the read was in flight; both batchers
-            // are null exactly then, and enqueuing into a stopped plugin would
-            // strand those ids in the in-flight sets for the next session.
-            // fastBatcher always exists whenever the plugin is running
-            // (rebuildBatcher() builds it unconditionally), so it alone is a
-            // reliable check.
-            if (fastBatcher === null) return;
+            // stop() may have run while the read was in flight, and enqueuing
+            // into a stopped plugin would strand those ids in the in-flight
+            // set for the next session.
+            if (!running) return;
             const openChannelId = SelectedChannelStore.getChannelId();
             if (!openChannelId) return;
             patchHealthWatch?.noteMessagesLoaded();
             // Same standing as a CHANNEL_SELECT: this IS the channel being
             // opened, as far as the plugin is concerned, so the history load
             // that follows a restart still counts as this open's backlog and
-            // keeps the quality tier. Only the SCROLLING after that is demoted.
+            // its context. Only the SCROLLING after that is left out of it.
             armInitialHistory(openChannelId);
             catchUp(openChannelId);
         });
@@ -7133,12 +6643,13 @@ export default definePlugin({
         removeMessageAccessory(SURFACE_ACCESSORY_ID);
         resetInPlaceFlips();
         resetNameTips();
+        // Asked again of the next session's first option card.
+        onboardingCardsSeen = false;
         // Nothing queued is sent after this, and the cache is saved as it is.
         surfaceService?.stop();
         void surfaceCache?.persistNow();
         surfaceCache?.clear();
         surfaceService = null;
-        surfaceGoogleCooldownUntil = 0;
         surfaceCache = null;
         surfaceBudget = null;
         setSurfaceService(null);
@@ -7182,6 +6693,7 @@ export default definePlugin({
         renewalFollowUp = null;
         askedForExpiry = null;
         forgetNotices();
+        setEventSource(null);
         deviceLimited = false;
         if (deadRecheckTimer !== null) clearTimeout(deadRecheckTimer);
         deadRecheckTimer = null;
@@ -7221,15 +6733,14 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);
         FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoaded);
-        fastBatcher?.dispose();
+        running = false;
         qualityBatcher?.dispose();
-        fastBatcher = null;
         qualityBatcher = null;
         // Anything still marked in-flight belongs to a batcher that just got
         // disposed without flushing -- without this, those ids would stay
         // permanently unretryable across a stop/start cycle.
-        inFlightFast.clear();
         inFlightQuality.clear();
+        forceAfterFlight.clear();
         // Same reasoning: a stop() mid-request must not leave a message
         // stuck showing "⚡ translating…" forever across a stop/start cycle.
         if (forcedInFlight.size > 0) {
@@ -7247,33 +6758,39 @@ export default definePlugin({
             notifyForcedInFlight();
         }
         // Toggling the plugin off and on is an explicit user action and a
-        // natural retry boundary — the same one a restart provides — so the
-        // quality tier's one-attempt-per-message budget resets with it.
+        // natural retry boundary — the same one a restart provides — so ✦'s
+        // one-attempt-per-message budget resets with it.
         qualityAttempted.clear();
+        omittedOnce.clear();
+        // The holds are about the relay's answers in this session; the next
+        // start() learns them again from its first answers.
+        planHeldUntil = 0;
+        pausedUntil = 0;
+        pausedNoticeDay = "";
+        // The plan messages: off, and read again by the next start.
+        planMessagesOn = false;
+        planStartChecked = false;
+        planNotesKey = null;
+        planNotesWanted = null;
+        planNotes = emptyNotes();
+        updatePanelShown = null;
+        listenForTyping(false);
+        keyListener = null;
+        lastKeyAt = 0;
         // start() arms this again for whatever channel is on screen, so a
         // token left over from the previous session would only ever be a stale
         // claim on the quality tier.
         initialHistoryPending.clear();
-        // Bump the generation so an in-flight request from before stop()
-        // (e.g. a Claude call awaiting its response) fails its post-await
-        // guard check in runTier and returns before ever reaching
-        // fallBackToGoogle()/rebuildBatcher() — otherwise it could resurrect
-        // a batcher (and re-set sessionFallback) on an already-stopped
-        // plugin. Must happen so any myGeneration captured before this
-        // point can never match again.
+        // Bump the generation so an in-flight request from before stop() fails
+        // its post-await guard check in runTier and returns before ever
+        // writing or re-queuing anything on an already-stopped plugin. Must
+        // happen so any myGeneration captured before this point can never
+        // match again.
         batcherGeneration++;
-        // So toggling the plugin off/on after fixing a bad key retries
-        // Claude instead of staying pinned to Google.
-        sessionFallback = false;
-        fallbackPinnedFor = null;
-        fallbackExpiresAt = null;
-        // Session-scoped by design: a new session may have a different engine,
-        // model or target language, and answers from the old one should not
-        // silently survive into it.
+        // Session-scoped by design: a new session may have a different target
+        // language, and answers from the old one should not silently survive
+        // into it.
         qualityPhrases.clear();
-        // The mention case's per-message words: worked out for this session's
-        // readable texts; the next session works them out again.
-        edgeMentions.clear();
         // THE TWO CALLBACK LISTS. Both hold functions belonging to subtitle
         // components from the session being torn down. Nothing removed them:
         // stop() unsubscribed Flux and disposed the batchers, then left these
@@ -7318,7 +6835,6 @@ export default definePlugin({
         // plugin session, so restarting Discord (or toggling the plugin off
         // and on) must not buy a fresh probe request. start() reads it back.
         __resetCooldowns();
-        announcedMissingKey = false;
         announcedCooldown = false;
         // Wakes anything still queued behind the rate gate immediately
         // (rather than leaving it to time out on the next refill tick) and
@@ -7327,12 +6843,6 @@ export default definePlugin({
         // is persisted and start() reads it back, so the next session does not
         // reopen the gate at the untaught defaults and buy a fresh 429.
         resetRateGate();
-        // The provider's last reported remaining count. Dropped with the rest
-        // of the in-memory session state and deliberately NOT persisted: it
-        // describes a rate-limit window that has almost certainly rolled over
-        // by the time anything reads it again, and a stale count shown as if
-        // it were current is worse than showing the gate's own number.
-        providerQuota = null;
         // Drops the session AND any armed coalescing timer, so a stopped plugin
         // cannot write a beacon afterwards. That matters for more than
         // tidiness: the beacon's `loadedAt` is what the installer compares

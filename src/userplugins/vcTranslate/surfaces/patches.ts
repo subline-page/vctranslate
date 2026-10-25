@@ -86,7 +86,9 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
             {
                 // The stage row's subtitle: the props of Discord's own
                 // OverflowTooltip, exactly { children } for anyone not paid.
-                match: /(renderSubtitle=\(\)=>\{let (\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:\(0,\i\.jsx\)\(\i\.\i,\{)children:\2\}/,
+                // Canary 650021 (2026-10-24) added a disableTooltips argument
+                // and a shouldShow prop; both forms match, shouldShow is kept.
+                match: /(renderSubtitle=(?:\(\)|\i)=>\{let(?: |\{disableTooltips:\i\}=\i,)(\i)=this\.props\.stageInstance\?\.topic;return null==\2\?null:\(0,\i\.jsx\)\(\i\.\i,\{(?:shouldShow:!\i,)?)children:\2\}/,
                 replace: "$1...$self.stageTopicProps($2,this.props.channel)}"
             },
             {
@@ -136,7 +138,7 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         }]
     },
     {
-        surface: "onboarding prompt question and options (line under the question)",
+        surface: "server question (onboarding): the question's line under it; a drop-down's options as \"original ≈ translation\" lines there too, and option cards' options when the card patch below does not apply",
         source: "written against the current bundle (the onboarding flow)",
         find: "gotoNextPrompt:",
         replacement: [{
@@ -273,6 +275,25 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
             // so one anchor fits all three channels.
             match: /(\(0,\i\.jsx\)\(\i,\{user:\i,usernameIcon:\i,pronouns:\i,primaryGuild:\i,contextGuildId:\i,onClickUsername:\i,[^{}()]*?trailing:\i\}\))\]/,
             replace: "$1,$self.profileNameLine(arguments[0])]"
+        }]
+    },
+
+    /*
+     * SERVER QUESTIONS (0.2.9). The question's own line stays under the
+     * heading (the onboarding patch above); each option's lines go inside its
+     * own card, under its title and description, so a line sits next to the
+     * text it translates. When this patch does not apply, the heading shows
+     * every option again, each with its original (index.tsx OnboardingLines).
+     */
+    {
+        surface: "server question option cards: each option's lines inside its own card, under its title and description",
+        source: "Discord build 2026-10-20 (public web bundle): the onboarding option card, the only module with this find, rendered once per option by the option cards question",
+        find: "\"translateX(0)\":\"translateX(8px)\"",
+        replacement: [{
+            // The card's text column: [title, description or null]. One child
+            // is appended; the option record is the one the title reads.
+            match: /(\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-md\/medium",color:"text-strong",children:(\i)\.title\}\),\2\.description\.length>0\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-xs\/normal",color:"text-default",children:\2\.description\}\):null)\]/,
+            replace: "$1,$self.onboardingOptionLines($2)]"
         }]
     }
 ];

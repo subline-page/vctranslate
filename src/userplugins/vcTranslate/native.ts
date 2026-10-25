@@ -1,19 +1,16 @@
 import type { IpcMainInvokeEvent } from "electron";
 
 import { type AppSignals, cachedAppVersionReader, readAppSignalsSync } from "./appSignals";
-import { translateWithClaude, TRUNCATED_ERROR } from "./engines/claude";
-import { translateWithGemini } from "./engines/gemini";
-import { translateWithGoogle } from "./engines/google";
-import { translateWithGroq } from "./engines/groq";
 import {
     type FeedbackPostResult, fetchRelayChannels, fetchRelayCheckout, fetchRelayLink, fetchRelayLinkPoll, fetchRelayMoveFinish, fetchRelayMoveStart, fetchRelayPrefs, fetchRelayRedeem, fetchRelayStatus,
-    MOVE_TICKET_RE, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed
+    isFunnelEvent, MOVE_TICKET_RE, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed
 } from "./engines/relay";
 import { HttpError } from "./httpError";
+import type { CheckGives, PlanAccess } from "./planAccess";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
 import { askHelperForUpdate as askHelper, type AskResult } from "./helperKick";
-import { readStagedBuildIdSync } from "./stagedBuild";
+import { readStagedBuildIdSync, readStagedVersionSync } from "./stagedBuild";
 import { isBuildId } from "./statusShape";
 import { type LaunchApp, noteLaunchWhenPrimary, writeStatusBeacon } from "./statusFile";
 import type { BatchRequest, EngineId, Result } from "./types";
@@ -149,8 +146,8 @@ function httpStatus(msg: string): number | undefined {
  * split/join rather than a regex: the key is arbitrary user input and must not
  * be interpreted as a pattern.
  *
- * No-op for an unset key. The blank check is `trim()`, not `length`: the google
- * path passes "", and a whitespace-only key is not a secret but WOULD otherwise
+ * No-op for an unset key. The blank check is `trim()`, not `length`: a
+ * caller may pass "", and a whitespace-only key is not a secret but WOULD otherwise
  * be a live separator — scrubbing on "   " would replace every three-space run
  * in an unrelated message with [redacted]. Guarding on length alone leaves that
  * hole open; splitting on "" would shred the message into single characters.
@@ -166,23 +163,16 @@ function scrubKey(message: string, apiKey: string): string {
 /** 4xx failures repeat identically on retry; 429 and everything else may not. */
 function isRetryable(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
-    // A truncated response carries no HTTP status, so the "no status → retry"
-    // default below would retry it — and the retry sends the same prompt with
-    // the same output budget, truncating at exactly the same place. Pure
-    // double spend for a guaranteed second failure.
-    if (msg === TRUNCATED_ERROR) return false;
     const status = httpStatus(msg);
     if (status === undefined) return true; // network/parse error — one retry is worthwhile
-    // A 429 is NOT retried here, for the same reason as TRUNCATED_ERROR above:
-    // it is a guaranteed second failure at double the cost. The API states how
+    // A 429 is NOT retried here: it is a guaranteed second failure at double
+    // the cost. The API states how
     // long to wait and it is far longer than any delay worth blocking an IPC
     // call for — 33s in one captured response, against this retry's 1s — so the
     // second attempt is rejected too, having consumed another request from the
     // very quota that is exhausted. Rate limiting is handled where it can be
     // handled properly: the renderer parks the engine for the interval the API
-    // asked for. Nothing is re-sent or diverted — the fast tier put a Google
-    // line on screen for these exact messages before the LLM was ever asked,
-    // so a rate-limited batch costs the reader only the upgrade.
+    // asked for, marks the messages as waiting, and asks again after it.
     if (status === 429) return false;
     return status < 400 || status >= 500;  // retry 5xx, never other 4xx
 }
@@ -190,62 +180,48 @@ function isRetryable(err: unknown): boolean {
 /**
  * The single dispatch point: engine id → engine call.
  *
- * Extracted from `translateBatch`'s retry closure so the per-engine argument
- * lists (which differ — Google takes no key, Claude takes no model) live in
- * one readable place, and so adding an engine is one branch here rather than a
- * longer expression inside a callback.
+ * 0.2.9 is AI only (spec decision 1): the relay is the one engine. Google and
+ * the short-message judge are gone, and the bring-your-own-key engines
+ * (Claude, Gemini, Groq) are refused here even if an old setting or a stale
+ * caller names one: nothing may leave this computer for a provider the build
+ * does not offer. The refusal is a 4xx-shaped error, so it is not retried.
  */
 async function runEngine(
     engine: EngineId,
     req: BatchRequest,
     apiKey: string,
-    model: string | undefined,
-    debug: boolean,
     install?: string
 ): Promise<EngineOutcome> {
-    // The relay states the ceiling for this code on every success; Groq is
-    // the only engine that reports a remaining count of its own.
-    if (engine === "relay") {
-        const out = await translateWithRelayDetailed(req, apiKey, fetch, install);
-        return {
-            results: out.results,
-            statedLimitPerMinute: out.rpmLimit,
-            quotaUsed: out.used,
-            quotaCap: out.cap,
-            serverNow: out.serverNow
-        };
-    }
-    if (engine === "groq") return translateWithGroq(req, apiKey, fetch, model, debug);
-    if (engine === "claude") return { results: await translateWithClaude(req, apiKey, fetch, debug) };
-    if (engine === "gemini") {
-        return { results: await translateWithGemini(req, apiKey, fetch, model, debug) };
-    }
-    return { results: await translateWithGoogle(req) };
+    if (engine !== "relay") throw new HttpError(`${String(engine)}: HTTP 400 engine not available in this build`, 400);
+    // The relay states the ceiling for this code on every success.
+    const out = await translateWithRelayDetailed(req, apiKey, fetch, install);
+    return {
+        results: out.results,
+        statedLimitPerMinute: out.rpmLimit,
+        quotaUsed: out.used,
+        quotaCap: out.cap,
+        serverNow: out.serverNow
+    };
 }
 
 /**
- * `model` is meaningful for Gemini and Groq today. It crosses IPC as an argument
- * rather than being read here because settings live in the RENDERER — the main
- * process has no access to the plugin's settings store — so this is the same
- * route `apiKey` already takes. An empty/absent value means "whatever the
- * engine's default is" (see DEFAULT_GEMINI_MODEL in types.ts); the engine, not
- * this function, owns that fallback.
+ * One ✦ batch, from the renderer. `apiKey` is the relay credential (the saved
+ * code, or the install bearer when there is none).
+ *
+ * `_model` and `_debug` are no longer read (they served the
+ * bring-your-own-key engines). They stay in the signature because the IPC
+ * call and the browser add-on's bridge pass arguments by position, and the
+ * install bearer comes after them.
  */
 export async function translateBatch(
     _: IpcMainInvokeEvent,
     engine: EngineId,
     apiKey: string,
     reqJson: string,
-    model?: string,
-    // Same route as `apiKey`/`model`, for the same reason (see their own
-    // comments): the debugLogging setting lives in the RENDERER, and this
-    // process cannot read it, so the renderer reads it once and passes the
-    // answer down. Defaults false so every existing call site (and every test
-    // that does not care about this) behaves exactly as it did before this
-    // parameter existed.
-    debug = false,
+    _model?: string,
+    _debug = false,
     // The install bearer ("free_<hex>"), sent to the relay as x-subline-install
-    // so it can apply the 3-computer limit. Ignored by every other engine.
+    // so it can apply the 3-computer limit.
     install?: string
 ): Promise<NativeResponse> {
     let req: BatchRequest;
@@ -257,12 +233,11 @@ export async function translateBatch(
 
     try {
         const outcome = await withRetry(
-            () => runEngine(engine, req, apiKey, model, debug, install),
+            () => runEngine(engine, req, apiKey, install),
             { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
         );
-        // `providerRateLimit` is undefined for every engine that reports
-        // nothing, which is what keeps this response byte-identical to the one
-        // Gemini/Claude/Google produced before this field existed.
+        // `providerRateLimit` stays undefined: the relay reports no
+        // provider count of its own (it states `rpmLimit` instead).
         return {
             ok: true,
             results: outcome.results,
@@ -288,9 +263,11 @@ export async function translateBatch(
         // engine had no hint to offer.
         const rateLimited = httpStatus(raw) === 429;
         const hinted = (err as { retryAfterMs?: unknown })?.retryAfterMs;
+        // A 503 that names its own wait (the relay's off switch, or the
+        // provider's limit) keeps it too, so the renderer waits as long as asked.
         const retryAfterMs = rateLimited
             ? (typeof hinted === "number" ? hinted : 30_000)
-            : undefined;
+            : (typeof hinted === "number" && hinted > 0 ? hinted : undefined);
 
         // The quota the API says it just enforced, when it said so (see
         // rateHint.ts). Unlike retryAfterMs there is NO default: the renderer
@@ -332,7 +309,9 @@ export type RelayStatusResponse =
         /* v2: present together when the relay speaks the paid-only model. */
         automatic?: boolean; ai?: boolean; aiUntil?: number; code?: string;
         previews?: { used: number; cap: number }; token?: string; tokenExpiresAt?: number;
-        deadCode?: string; grant?: "early"; check?: { valid: boolean; automatic: boolean; ai: boolean };
+        deadCode?: string; grant?: "early"; check?: { valid: boolean; automatic: boolean; ai: boolean; gives?: CheckGives };
+        /* 0.2.9: the plan state (planAccess.ts), and "the link stands, the plan could not be read". */
+        access?: PlanAccess; accessUnknown?: boolean;
         /* API 3: whether this install's account is linked to a Discord account (absent: not stated). */
         linked?: boolean;
         /* A link answer only: the saved code was left out, and why. */
@@ -479,6 +458,8 @@ function statusResponseFrom(status: RelayStatus): RelayStatusResponse {
         if (status.mustLink === true) out.mustLink = true;
         if (status.pendingPurchase === true) out.pendingPurchase = true;
         if (status.moved === true) out.moved = true;
+        if (status.access !== undefined) out.access = status.access;
+        if (status.accessUnknown === true) out.accessUnknown = true;
     }
     if (status.off !== undefined) out.off = [...status.off];
     return out;
@@ -643,6 +624,15 @@ export async function readStagedBuildId(_: IpcMainInvokeEvent): Promise<string |
 }
 
 /**
+ * The version of the mod bundle staged on disk (see stagedBuild.ts), or null.
+ * The restart notice links to that version's release notes (updateNotice.ts).
+ * Never throws.
+ */
+export async function readStagedVersion(_: IpcMainInvokeEvent): Promise<string | null> {
+    return readStagedVersionSync();
+}
+
+/**
  * Ask the background helper for a newer build now, when the release feed has
  * one (helperKick.ts). The renderer calls this every few minutes; the answer
  * is for its log only. Never throws.
@@ -688,6 +678,16 @@ export async function relaySendFeedback(_: IpcMainInvokeEvent, install: string, 
         return { ok: false, error: "rejected" };
     }
     return postFeedback(install, json, fetch);
+}
+
+/**
+ * Send one funnel step (events.ts) for the owner page. Here for the reason
+ * relayStatus is: the renderer does no network for the relay. Only the five
+ * known names go out. Never throws: true when the relay took it.
+ */
+export async function relayEvent(_: IpcMainInvokeEvent, credential: string, install: string, name: string): Promise<boolean> {
+    if (!isString(credential) || !isString(install) || !isFunnelEvent(name)) return false;
+    return postEvent(credential, install, name, fetch);
 }
 
 /**

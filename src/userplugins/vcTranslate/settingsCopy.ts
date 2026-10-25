@@ -13,24 +13,22 @@ export const SETTINGS_COPY = {
         title: "Subline code",
         description: "From your purchase email. Keeps everything automatic."
     },
-    /** The plan card at the top of the page: what this install has, and its code. */
+    /**
+     * The plan card at the top of the page: its code and links. The plan line
+     * itself is the ✦ button's hover text (upgradeCopy.ts PLAN_COPY, picked by
+     * planState.ts), so the two never disagree.
+     */
     plan: {
-        none: "Not activated.",
-        automatic: "Plan: Automatic.",
-        ai: "Plan: Automatic + AI.",
         codeLabel: "Your code:",
         copy: "Copy",
         copied: "Code copied.",
-        /** Where Activate was: buys Automatic (it opens the panel with the price first). */
-        buyAutomatic: "Buy Automatic",
-        addAi: "Add AI",
+        /** Opens the plan panel (the prices first). */
+        subscribe: "Subscribe",
         /** The account line, once linked. {name} is the Discord username, read locally (UserStore). */
         linkedTo: "Linked to @{name}",
         /** In place of the plan while the Discord account is not linked, and its link. */
         notLinked: "Link your Discord account to use Subline.",
         link: "Link",
-        /** In place of Activate / Add AI while a payment is on its way (same words as UPGRADE_COPY.paymentPending). */
-        paymentPending: "Payment being confirmed",
         enterCode: "Enter a code",
         /** The browser add-on only, with a plan (0.2.8): the line, then its link to subline.page. */
         appPrompt: "Also want it in the Discord app?",

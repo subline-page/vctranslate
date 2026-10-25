@@ -5,7 +5,7 @@
  * The plugin runs in Discord's page and does no network itself (see the
  * plugin's transport.ts). On the desktop its calls go to Electron's main
  * process; in the browser they come here, to the add-on's background, which
- * has host permissions for exactly two hosts and so needs no CORS from either:
+ * has host permissions for exactly one host (the relay) and so needs no CORS:
  *
  *   page (pageBridge.js) → content script (content.js) → background (this)
  *
@@ -35,17 +35,19 @@ export const BRIDGE_METHODS = [
 export type BridgeMethod = typeof BRIDGE_METHODS[number];
 
 /**
- * The only origins the background may fetch: the relay and Google's
- * translate host (engines/relay.ts and engines/google.ts). Also the add-on's
- * host permissions, apart from Discord itself (see webManifest.mjs).
+ * The only origin the background may fetch: the relay (engines/relay.ts).
+ * 0.2.9 is AI only (spec decision 1), so Google's translate host is gone.
+ * Also the add-on's host permissions, apart from Discord itself (see
+ * webManifest.mjs).
  */
-export const ALLOWED_ORIGINS = ["https://relay.subline.page", "https://translate-pa.googleapis.com"] as const;
+export const ALLOWED_ORIGINS = ["https://relay.subline.page"] as const;
 
 /**
- * The engines the add-on runs. The key engines (Claude, Gemini, Groq) are not
- * offered in Settings and their hosts are not in the manifest.
+ * The engines the add-on runs: the relay only (0.2.9, AI only). Google and the
+ * judge are gone from the plugin; the key engines (Claude, Gemini, Groq) are
+ * not offered in Settings. Their hosts are not in the manifest.
  */
-export const BROWSER_ENGINES = ["relay", "google"] as const;
+export const BROWSER_ENGINES = ["relay"] as const;
 
 /**
  * The add-on's `x-subline-app` value (0.2.8): `addon/<version>`, from the
@@ -231,10 +233,10 @@ export function isAllowedUrl(input: unknown): boolean {
 
 /**
  * `fetch`, limited to ALLOWED_ORIGINS. Host permissions decide what the
- * background may read across origins; this makes the two hosts the only ones
- * it can reach at all, whatever a call asks for. A redirect is an error rather
- * than followed, so an allowed host cannot hand the request on to another one
- * (neither host redirects these requests).
+ * background may read across origins; this makes the relay the only host it
+ * can reach at all, whatever a call asks for. A redirect is an error rather
+ * than followed, so the relay cannot hand the request on to another host
+ * (it does not redirect these requests).
  */
 export function guardFetch(inner: typeof fetch): typeof fetch {
     return ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {

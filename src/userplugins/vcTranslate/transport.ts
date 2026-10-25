@@ -15,8 +15,8 @@ import type { EngineId } from "./types";
  * CORS, and the credential never touches Discord's page). In a browser there
  * is no main process: Vencord's web build has an empty `pluginHelpers`, so the
  * browser add-on puts a WEB TRANSPORT on `globalThis.__sublineWebTransport`
- * instead, which sends each call to the add-on's background (host permissions
- * for the relay and Google, so the relay opens no CORS either).
+ * instead, which sends each call to the add-on's background (host permission
+ * for the relay, so the relay opens no CORS).
  *
  * The choice is made on EVERY call, not once at load: the desktop helpers win
  * whenever they exist, and the web transport is used only when they do not.
@@ -37,6 +37,7 @@ import type { EngineId } from "./types";
  *   relaySendFeedback(install, json)                                  -> FeedbackPostResult
  *   relayChannels(credential, install, json?)                         -> RelayChannelsResult (GET without json, POST with it)
  *   relayPrefs(credential, install, json?)                            -> RelayPrefsResult (GET without json, POST with it)
+ *   relayEvent(credential, install, name)                             -> boolean (a funnel step; false when not sent)
  *
  * Each returns a Promise and should never reject (a failure is `{ ok: false }`
  * or `false`, as on the desktop). Every request to the relay carries the
@@ -67,12 +68,14 @@ export interface SublineTransport {
     relaySendFeedback(install: string, json: string): Promise<FeedbackPostResult>;
     relayChannels(credential: string, install: string, json?: string): Promise<RelayChannelsResult>;
     relayPrefs(credential: string, install: string, json?: string): Promise<RelayPrefsResult>;
+    relayEvent(credential: string, install: string, name: string): Promise<boolean>;
 }
 
 /** What only the desktop helpers can do (files beside the installed app). */
 export interface DesktopOnly {
     reportStatus(json: string): Promise<boolean>;
     readStagedBuildId(): Promise<string | null>;
+    readStagedVersion(): Promise<string | null>;
     readAppSignals(): Promise<AppSignals>;
     askHelperForUpdate(buildId: string, pluginVersion: string): Promise<AskResult>;
 }
@@ -173,8 +176,18 @@ export const transport: SublineTransport & DesktopOnly = {
         const fn = pick("relayPrefs");
         return fn === null ? { ok: false, error: "unavailable" } : await fn(...args);
     },
+    relayEvent: async (...args) => {
+        // An older main process or add-on without it: the step is not counted. Never throws.
+        try {
+            const fn = pick("relayEvent");
+            return fn === null ? false : await fn(...args) === true;
+        } catch {
+            return false;
+        }
+    },
     reportStatus: (...args) => desktopCall("reportStatus", args, false),
     readStagedBuildId: (...args) => desktopCall("readStagedBuildId", args, null),
+    readStagedVersion: (...args) => desktopCall("readStagedVersion", args, null),
     readAppSignals: (...args) => desktopCall("readAppSignals", args, NO_APP_SIGNALS),
     askHelperForUpdate: (...args) => desktopCall("askHelperForUpdate", args, "no-helper")
 };

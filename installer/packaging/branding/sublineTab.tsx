@@ -80,8 +80,8 @@ function SublineSettings() {
             <SettingsTab>
                 <Forms.FormTitle tag="h5">Subline is not loaded</Forms.FormTitle>
                 <Forms.FormText>
-                    The translation plugin did not start. Reinstalling Subline should fix it;
-                    if it does not, the installer writes a log naming the reason.
+                    Subline did not start. Reinstalling Subline should fix it.
+                    If it does not, the installer writes a log that names the reason.
                 </Forms.FormText>
             </SettingsTab>
         );

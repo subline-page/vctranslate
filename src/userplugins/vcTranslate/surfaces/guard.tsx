@@ -36,7 +36,7 @@ export const SYM_GUARDED = Symbol.for("subline.guarded");
 export type HandlerId =
     | "wrapParser" | "stageTopicProps" | "threadTitleProps" | "forumTitleChildren" | "forumTagChildren"
     | "statusTextChildren" | "bioInPlace" | "onboardingHeading" | "statusBubbleText" | "useSurfaceVersion"
-    | "replyQuoteChildren" | "messageAuthorName" | "mentionName" | "profileNameLine";
+    | "replyQuoteChildren" | "messageAuthorName" | "mentionName" | "profileNameLine" | "onboardingOptionLines";
 
 /**
  * What Discord had where the handler sits: its first argument (the handler

@@ -66,7 +66,6 @@ export const FEEDBACK_COPY = {
         languages: "Languages",
         errors: "Error codes",
         app: "App details",
-        google: "≈ Google",
         ai: "✦ AI"
     }
 } as const;
@@ -176,7 +175,8 @@ export function reportFor(
     return {
         original,
         translation,
-        glyph: stored.via === "google" ? "≈" : "✦",
+        // 0.2.9 is AI only: every line the reader can see is ✦.
+        glyph: "✦",
         source: langOrUnknown(typeof stored.lang === "string" ? stored.lang : undefined),
         target: langOrUnknown(target)
     };
@@ -238,7 +238,7 @@ export function previewRows(p: FeedbackPayload): PreviewRow[] {
     if (p.report) {
         rows.push({ label: L.original, value: p.report.original });
         rows.push({ label: L.translation, value: p.report.translation });
-        rows.push({ label: L.shownAs, value: p.report.glyph === "≈" ? L.google : L.ai });
+        rows.push({ label: L.shownAs, value: L.ai });
         rows.push({ label: L.languages, value: `${p.report.source} → ${p.report.target}` });
     }
     if (p.errors) rows.push({ label: L.errors, value: p.errors.map(e => `${e.code}${e.status ? ` (${e.status})` : ""} at ${e.at}`).join("\n") });

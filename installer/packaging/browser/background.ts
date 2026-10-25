@@ -5,7 +5,7 @@
  *
  * Two jobs:
  *  1. Run the plugin's network calls (router.ts), with fetch limited to the
- *     relay and Google's translate host.
+ *     relay.
  *  2. Firefox only: remove Discord's Content-Security-Policy from its page, as
  *     upstream Vencord's Firefox background does. Vencord's page code fetches
  *     its own stylesheet from the add-on and recompiles Discord's modules,

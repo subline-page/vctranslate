@@ -19,16 +19,12 @@
 export interface SurfaceTranslation {
     lang: string;
     text: string;
-    /** Google's detection confidence, when it gave one. */
-    conf?: number;
 }
 
 export interface SurfaceEntry {
-    /** ≈, Google. */
-    fast?: SurfaceTranslation;
     /** ✦, the relay. */
     quality?: SurfaceTranslation;
-    /** An engine judged it not foreign (already in the target language). */
+    /** ✦ judged it not foreign (already in the target language). */
     skip?: true;
     /**
      * The reader asked for this ✦ with a click on a name (0.2.8,
@@ -42,11 +38,17 @@ export interface SurfaceEntry {
 }
 
 /**
- * v2 (0.2.1): 0.2.0 cached Google's low-confidence "unsure" answers as
- * "not foreign" and never asked ✦ again. The first load of v2 migrates the old
- * key keeping only real translations, and drops every skip-only entry.
+ * v3 (0.2.9, AI only): the cache holds ✦ answers only. The first load of v3
+ * migrates the older keys (v2, and v1 from 0.2.0) keeping only ✦
+ * translations: every Google ≈ line is dropped, so none can ever show again,
+ * and so is every skip-only entry, since an older skip may be Google's verdict
+ * (v1's low-confidence "unsure" answers among them). Those texts are simply
+ * asked again. The older keys are emptied once migrated.
  */
-export const SURFACE_CACHE_KEY = "VcTranslate_surfaceCache_v2";
+export const SURFACE_CACHE_KEY = "VcTranslate_surfaceCache_v3";
+/** The 0.2.1 to 0.2.8 key (✦ and Google's ≈ side by side). */
+export const SURFACE_CACHE_V2_KEY = "VcTranslate_surfaceCache_v2";
+/** The 0.2.0 key. */
 export const SURFACE_CACHE_LEGACY_KEY = "VcTranslate_surfaceCache";
 export const SURFACE_CACHE_MAX_ENTRIES = 2_000;
 export const SURFACE_CACHE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -64,6 +66,15 @@ export function normalizeSurfaceText(text: string): string {
 
 export function surfaceKey(text: string, targetLang: string): string {
     return `${targetLang}\u0000${normalizeSurfaceText(text)}`;
+}
+
+/**
+ * A NAME or pronouns has its own key (0.2.9): names are always asked forced
+ * (a reading of a script the reader cannot read is always worth showing), so
+ * an older unforced "no translation needed" for the same text never hides it.
+ */
+export function nameKey(text: string, targetLang: string): string {
+    return `${targetLang}\u0001${normalizeSurfaceText(text)}`;
 }
 
 export interface SurfaceStorage {
@@ -84,19 +95,26 @@ export interface SurfaceCacheOptions {
 function isTranslation(v: unknown): v is SurfaceTranslation {
     if (v === null || typeof v !== "object") return false;
     const o = v as Record<string, unknown>;
-    return typeof o.lang === "string" && typeof o.text === "string" && o.text.trim() !== ""
-        && (o.conf === undefined || (typeof o.conf === "number" && Number.isFinite(o.conf)));
+    return typeof o.lang === "string" && typeof o.text === "string" && o.text.trim() !== "";
 }
 
-function isEntry(v: unknown): v is SurfaceEntry {
-    if (v === null || typeof v !== "object") return false;
+/**
+ * A stored row, checked field by field, as the entry it may be kept as, or
+ * null. Only ✦ (`quality`) and a ✦ skip are kept; a Google line (`fast`, an
+ * older build's) is never part of the result.
+ */
+function entryFrom(v: unknown): SurfaceEntry | null {
+    if (v === null || typeof v !== "object") return null;
     const o = v as Record<string, unknown>;
-    if (typeof o.at !== "number" || !Number.isFinite(o.at)) return false;
-    if (o.fast !== undefined && !isTranslation(o.fast)) return false;
-    if (o.quality !== undefined && !isTranslation(o.quality)) return false;
-    if (o.skip !== undefined && o.skip !== true) return false;
-    if (o.asked !== undefined && o.asked !== true) return false;
-    return o.fast !== undefined || o.quality !== undefined || o.skip === true;
+    if (typeof o.at !== "number" || !Number.isFinite(o.at)) return null;
+    if (o.quality !== undefined && !isTranslation(o.quality)) return null;
+    if (o.skip !== undefined && o.skip !== true) return null;
+    if (o.asked !== undefined && o.asked !== true) return null;
+    if (o.quality !== undefined) {
+        const q = o.quality as SurfaceTranslation;
+        return { quality: { lang: q.lang, text: q.text }, ...(o.asked === true ? { asked: true as const } : {}), at: o.at };
+    }
+    return o.skip === true ? { skip: true, at: o.at } : null;
 }
 
 export class SurfaceCache {
@@ -136,22 +154,17 @@ export class SurfaceCache {
     }
 
     /**
-     * Merge a verdict into an entry. A ✦ is never replaced by ≈. `asked`
+     * Merge a verdict into an entry. A skip never removes a ✦ line. `asked`
      * marks the entry's ✦ as one the reader asked for (only with a ✦ there).
      */
-    put(key: string, patch: { fast?: SurfaceTranslation; quality?: SurfaceTranslation; skip?: true; retract?: true; asked?: true }): SurfaceEntry {
+    put(key: string, patch: { quality?: SurfaceTranslation; skip?: true; asked?: true }): SurfaceEntry {
         const prev = this.map.get(key);
         const next: SurfaceEntry = { ...(prev ?? {}), at: this.opts.now() };
         if (patch.quality) {
             next.quality = patch.quality;
             delete next.skip;
         }
-        if (patch.fast && !next.quality) next.fast = patch.fast;
-        // A ✦ skip (`retract`) removes a ≈ line already cached: ✦ decided
-        // the text needs no translation, and a ≈ guess must not stay on screen.
-        // It never removes a ✦ line.
-        if (patch.skip && patch.retract && !next.quality) delete next.fast;
-        if (patch.skip && !next.quality && !next.fast) next.skip = true;
+        if (patch.skip && !next.quality) next.skip = true;
         if (patch.asked && next.quality) next.asked = true;
         this.map.delete(key);
         this.map.set(key, next);
@@ -190,18 +203,18 @@ export class SurfaceCache {
     /** Load from disk. Entries set this session win. Never rejects. */
     async load(): Promise<void> {
         let stored: unknown;
-        let migrated = false;
+        const migratedFrom: string[] = [];
         try {
             stored = await this.opts.storage.get(SURFACE_CACHE_KEY);
             if (!Array.isArray(stored)) {
-                // First start on v2: take the old cache's real translations
-                // only. Skip-only entries may be a stale "unsure" (see above).
-                const legacy = await this.opts.storage.get(SURFACE_CACHE_LEGACY_KEY);
-                if (Array.isArray(legacy)) {
-                    stored = legacy.filter(row => Array.isArray(row) && row.length === 2 && isEntry(row[1])
-                        && ((row[1] as SurfaceEntry).fast !== undefined || (row[1] as SurfaceEntry).quality !== undefined))
-                        .map(row => [row[0], { ...(row[1] as SurfaceEntry), skip: undefined }]);
-                    migrated = true;
+                // First start on v3: take the newest older cache's ✦ answers
+                // only (see SURFACE_CACHE_KEY). Both older keys are emptied.
+                for (const legacyKey of [SURFACE_CACHE_V2_KEY, SURFACE_CACHE_LEGACY_KEY]) {
+                    const legacy = await this.opts.storage.get(legacyKey);
+                    if (!Array.isArray(legacy)) continue;
+                    migratedFrom.push(legacyKey);
+                    if (Array.isArray(stored)) continue;
+                    stored = legacy.filter(row => Array.isArray(row) && row.length === 2 && entryFrom(row[1])?.quality !== undefined);
                 }
             }
         } catch {
@@ -213,9 +226,11 @@ export class SurfaceCache {
         for (const row of stored) {
             if (!Array.isArray(row) || row.length !== 2) continue;
             const [key, value] = row as [unknown, unknown];
-            if (typeof key !== "string" || key === "" || !isEntry(value)) continue;
-            if (now - value.at > this.maxAgeMs) continue;
-            loaded.set(key, value);
+            if (typeof key !== "string" || key === "") continue;
+            const entry = entryFrom(value);
+            if (entry === null) continue;
+            if (now - entry.at > this.maxAgeMs) continue;
+            loaded.set(key, entry);
         }
         // Disk order is LRU order (oldest first); session entries go after it.
         const session = [...this.map.entries()];
@@ -224,10 +239,12 @@ export class SurfaceCache {
         for (const [k, v] of loaded) if (!inSession.has(k)) this.map.set(k, v);
         for (const [k, v] of session) this.map.set(k, v);
         this.evict();
-        if (migrated) {
+        if (migratedFrom.length > 0) {
             this.schedulePersist();
-            // The old key is not read again; empty it so it holds nothing.
-            this.writes = this.writes.then(() => this.opts.storage.set(SURFACE_CACHE_LEGACY_KEY, [])).catch(() => { });
+            // The older keys are not read again; empty them so they hold nothing.
+            for (const legacyKey of migratedFrom) {
+                this.writes = this.writes.then(() => this.opts.storage.set(legacyKey, [])).catch(() => { });
+            }
         }
     }
 

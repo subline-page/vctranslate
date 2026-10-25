@@ -75,12 +75,10 @@ export const PRODUCT_DIR_NAME = "Subline";
 export { BUILD_ID, PLUGIN_VERSION };
 
 /**
- * Which glyph the reader saw. `approx` is Google's `≈` line — free, instant,
- * per-message, no conversation context. `upgraded` is an LLM's `✦` — batched,
- * context-aware. Both count as working; the split is what lets the installer
- * say "translating, but the ✦ upgrade never arrives", which is precisely the
- * failure that cost this project its week and would otherwise look identical
- * to a healthy install.
+ * Which glyph the reader saw. `upgraded` is ✦ — batched, context-aware.
+ * `approx` was Google's `≈` line; 0.2.9 is AI only, so nothing counts as
+ * `approx` any more. The field stays in status.json, always 0, because the
+ * installer (and installers already on disk) read both counts.
  */
 export type BeaconTier = "approx" | "upgraded";
 
@@ -92,7 +90,6 @@ export type BeaconTier = "approx" | "upgraded";
  * which imports Vencord aliases the main process cannot resolve.
  */
 const TIER_BY_ENGINE: Record<EngineId, BeaconTier> = {
-    google: "approx",
     relay: "upgraded",
     claude: "upgraded",
     gemini: "upgraded",
@@ -114,7 +111,7 @@ export function tierForEngine(engine: EngineId): BeaconTier {
 export const BEACON_ERROR_CODES = [
     /** 429. The engine is over quota — possibly for a model the key cannot use at all. */
     "rate-limited",
-    /** 401. The key itself was rejected; the session has fallen back to Google. */
+    /** 401. The code or key itself was rejected. */
     "auth-rejected",
     /**
      * 403. The request never got as far as the key — the network, region or ISP

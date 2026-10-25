@@ -186,7 +186,7 @@ export function parseManifest(text: string): ParsedManifest {
         };
     }
     if (typeof raw.pluginVersion !== "string" || raw.pluginVersion.length === 0) {
-        return { manifest: null, problem: `${MOD_MANIFEST_FILENAME} does not record a plugin version.` };
+        return { manifest: null, problem: `${MOD_MANIFEST_FILENAME} does not record a Subline version.` };
     }
 
     const vencord = (raw.vencord ?? null) as Record<string, unknown> | null;

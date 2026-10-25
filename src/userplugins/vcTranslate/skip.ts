@@ -108,25 +108,29 @@ export function collapseElongationToPair(s: string): string {
 const LAUGHTER = /^(?:[jha]{4,}|k{3,}|w{3,}|(?:x+d+)+|(?:lo)+l|(?:rs){2,}|5{3,}|[ㄱㅎ]{2,})$/i;
 
 /**
- * A message whose every whitespace-separated token is the same word carries no
- * more meaning than the single word, and translation engines handle it badly:
- * Google detected "GOJ GOJ GOJ GOJ" as Esperanto and rendered it as a slur
- * attributed to the sender. Requires 2+ tokens so a single real word is
- * untouched.
+ * A message whose every whitespace-separated token is the same word, as that
+ * one word ("haha haha", "lol lol lol"), or null when the tokens differ or
+ * there is only one. The message is then judged as the word alone: repeated
+ * laughter is still laughter. A repeated REAL word is still words (0.2.9,
+ * decision 2): "GOJ GOJ GOJ" used to be dropped here because Google turned it
+ * into a slur, and ✦ reads it in context instead.
  */
-function isRepeatedToken(s: string): boolean {
+function repeatedToken(s: string): string | null {
     const tokens = s.split(/\s+/).filter(Boolean);
-    if (tokens.length < 2) return false;
+    if (tokens.length < 2) return null;
     const first = tokens[0].toLowerCase();
-    return tokens.every(t => t.toLowerCase() === first);
+    return tokens.every(t => t.toLowerCase() === first) ? first : null;
 }
 
 /**
  * English chat shorthand. These are already in the target language for an
  * English-speaking user, but they are too short and too unlike dictionary
- * words for statistical detection to place them: Google reads "hbu" as
- * Frisian and "u2" as Chinese, then returns them unchanged. Catching them
+ * words for statistical detection to place them: Google read "hbu" as
+ * Frisian and "u2" as Chinese, then returned them unchanged. Catching them
  * here avoids the request entirely rather than paying for a no-op.
+ *
+ * ENGLISH READERS ONLY (0.2.9, decision 2). For a reader of any other
+ * language "idk tbh" is foreign text like any other, and ✦ translates it.
  *
  * Only fires when the WHOLE message is shorthand, so "hbu, tienes hambre?"
  * still translates.
@@ -177,7 +181,18 @@ function isChatShorthand(s: string): boolean {
     );
 }
 
-export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
+/** An English reader ("en", "en-GB"): chat shorthand is their own language. */
+function readsEnglish(targetLang: string): boolean {
+    return targetLang.toLowerCase().split(/[-_]/)[0] === "en";
+}
+
+/**
+ * Nothing to translate for this reader (0.2.9, decision 2): their own
+ * message, nothing but emoji, links, mentions, digits or punctuation,
+ * laughter, or English chat shorthand for an English reader. Everything else
+ * is sent: real foreign text is ✦'s to translate, never dropped here.
+ */
+export function shouldSkip(text: string, isOwnMessage: boolean, targetLang: string): boolean {
     if (isOwnMessage) return true;
 
     // Anything left that is only digits, punctuation, whitespace, or combining
@@ -194,9 +209,10 @@ export function shouldSkip(text: string, isOwnMessage: boolean): boolean {
         .replace(/[\p{P}\p{S}\p{M}]/gu, "")
         .trim();
 
-    if (isChatShorthand(words)) return true;
-    if (isRepeatedToken(words)) return true;
-    if (LAUGHTER.test(words.replace(/\s+/g, ""))) return true;
+    // A repeated token is judged as the token alone.
+    const judged = repeatedToken(words) ?? words;
+    if (readsEnglish(targetLang) && isChatShorthand(judged)) return true;
+    if (LAUGHTER.test(judged.replace(/\s+/g, ""))) return true;
 
     return false;
 }

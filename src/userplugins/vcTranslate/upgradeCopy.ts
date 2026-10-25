@@ -1,8 +1,10 @@
 /**
  * Every user-facing string for activating and upgrading Subline from inside
- * Discord: the activation notice, the Activate and Add AI panels, the code
- * entry, their toasts, and the ⚡ popover labels. One place, so the copy can be
- * rewritten without reading any code. Short plain sentences, no em dashes.
+ * Discord: the activation notice, the plan panel, the code entry, their
+ * toasts, and the ⚡ popover labels. One place, so the copy can be rewritten
+ * without reading any code. Short plain sentences, no em dashes. Never
+ * "free", "trial", "VcTranslate", "Plugins" or "plugin" (0.2.9 spec, copy
+ * rules; tests/planCopy.test.ts).
  */
 /** AI prices in cents, as on the Dodo products. The yearly saving below is derived from them. */
 export const AI_MONTHLY_CENTS = 199;
@@ -23,12 +25,6 @@ export const UPGRADE_COPY = {
     /** A notice that stays until dismissed, shown once per session while not activated. */
     activateNotice: "Subline isn't active on this Discord account yet.",
     activateButton: "Activate",
-    activateTitle: "Activate Subline",
-    activateSubtitle: "Pay once and every message gets translated.",
-    automaticName: "Automatic",
-    automaticPrice: "$4.99 once",
-    automaticNote: "≈ under every message, profile and embed. Yours for good.",
-    automaticButton: "Buy for $4.99",
     enterCodeButton: "Enter a code",
 
     /* ---- entering a code (promo codes and license keys) ---- */
@@ -68,11 +64,9 @@ export const UPGRADE_COPY = {
     earlyCheckingNotice: "Checking your early-user access. This can take a minute.",
     earlyCheckingNoticeButton: "OK",
 
-    /* ---- Automatic owners: add AI ---- */
-    panelTitle: "Add AI",
-    panelSubtitle: "✦ reads the whole conversation, so slang and replies come out right.",
+    /* ---- the plan panel (0.2.9): monthly, yearly, Enter a code ---- */
     /**
-     * The only line under the AI plans in the Add AI panel (P3): a Dodo coupon
+     * The only line under the prices in the plan panel (P3): a Dodo coupon
      * goes on the checkout page, not in Subline. Coupons are made for the
      * monthly plan only (relay createCoupon: restricted_to [monthly]), so the
      * yearly page refuses them: the line says which button to press.
@@ -80,60 +74,118 @@ export const UPGRADE_COPY = {
     couponHint: "Coupon? Pick $1.99 a month, then enter it on the payment page.",
     monthlyButton: "$1.99 a month",
     annualButton: `$19.99 a year · ${ANNUAL_NOTE}`,
-    aiNeedsAutomatic: "AI needs Automatic first.",
-    /** Buy on an account that already has Automatic (relay 409 already_owned, 0.2.8 spec: "You have this plan"). */
-    alreadyAutomatic: "You have this plan.",
-    /** Monthly or Yearly on an install that already has AI (relay 409 already_owned). */
+    /** Monthly or Yearly on an account that already has AI (relay 409 already_owned). */
     alreadyAi: "You have this plan.",
-    /** Buy or Add AI while a payment from this install is still being confirmed. */
+    /** Subscribe while a payment from this install is still being confirmed. */
     purchasePending: "Your payment is still being confirmed. It switches on by itself.",
     /**
-     * In place of "Add AI" (and "Activate") on the plan card, the ⚡ popover,
-     * the ✦ preview line and as the panel title, while a payment is on its way
-     * (P4): a checkout was opened, or the relay said purchase_pending.
+     * In place of Subscribe on the plan card, the ⚡ popover and as the plan
+     * panel's text, while a payment is on its way (P4): a checkout was
+     * opened, or the relay said so. The ✦ button's hover text too (decision 11).
      */
-    paymentPending: "Payment being confirmed",
+    paymentPending: "Payment on its way",
     /** The relay answered that it cannot sell this right now (no product set up, or the shop is down). */
     checkoutUnavailable: "Buying isn't available yet. Use a code, or try again later.",
     /** In a browser: the popup blocker stopped the checkout tab (checkout.ts ReservedTab). */
     checkoutBlocked: "Your browser blocked the checkout window. Allow pop-ups for discord.com, then try again.",
 
     /* ---- shared ---- */
-    /** Under the Activate panel only. */
-    panelFootnote: "Pay in your browser. Subline switches on here by itself.",
     checkoutOpenedToast: "Finish checkout in your browser.",
     /** A notice that stays until dismissed: the buyer is often still in the browser when it lands. */
     purchasedNotice: "You're on. Every message translates by itself now.",
     purchasedNoticeButton: "OK",
-    /** Instead of "You're on." when the relay grants Automatic to an early user. */
-    earlyNotice: "Thanks for being early. Automatic is yours, no payment needed.",
-
-    /* ---- ✦ previews (Automatic) ---- */
     /**
-     * The end of the hover text on a "≈ rough" line written in Latin letters
-     * (Automatic only: no ✦ line comes by itself on that plan).
+     * Instead of "You're on." when the relay grants the early-user plan
+     * (0.2.9: treated as a new account, so the 7 days, spec decision 4).
      */
-    roughPreviewHint: "Press ⚡ to check it with ✦ AI.",
-    /** The ⚡ popover for an Automatic owner. {n} is how many are left today. */
-    popoverPreview: "Preview ✦ ({n} left today)",
-    /** The ⚡ popover once today's previews are used. */
-    popoverUpgrade: "Add AI ✦",
+    earlyNotice: "Thanks for being early. Your 7 days of AI ✦ start with your first translation.",
+
+    /* ---- ⚡ while ✦ is off: five AI translations a day (spec decision 6) ---- */
+    /** The ⚡ popover while ✦ is off. {n} is how many are left today. */
+    popoverPreview: "Translate with AI ({n} left today)",
+    /** The ⚡ popover once today's five are used. A press opens the plan panel. */
+    popoverUpgrade: "No AI translations left today · Subscribe",
     // A ⚡ press on a message ✦ says is already in the reader's language: no
     // duplicate line, just this.
     nothingToTranslate: "✦ nothing to translate here",
-    /** The link after a ✦ preview. */
-    previewLink: "Add AI",
-    /** Hover text on a ≈ line waiting for Google. */
-    googleBusy: "Google is busy. Subline retries by itself."
+
+    /* ---- the ✦ pipeline (0.2.9) ---- */
+    /** A message whose ✦ request got no answer yet (it is asked again by itself). */
+    waitingLine: "⏳ translating…",
+    waitingTitle: "No answer yet. Subline asks again by itself.",
+    /** A message the AI left out twice. ⚡ asks again. */
+    failedLine: "⚠ not translated",
+    failedTitle: "The AI did not return this message. Press ⚡ to try again.",
+    /**
+     * The hidden daily ceiling (spec decision 5): one plain notice, never a
+     * number. "Tomorrow" is the next UTC day, when the relay resets it.
+     */
+    aiPaused: "Translation is paused until tomorrow.",
+    aiPausedButton: "OK"
 } as const;
+
+/**
+ * THE PLAN STATE (0.2.9 spec, decisions 11 to 13): the ✦ chat-bar button's
+ * hover text, the plan panel, the last-day notice, the ended panel and the
+ * update panel. planState.ts picks the sentence. {n}: a whole number of days.
+ * The hidden daily ceiling is never a number here (decision 5).
+ */
+export const PLAN_COPY = {
+    /** ✦ on: a subscription, or a buyer (AI for good). */
+    on: "AI translation on",
+    /** ✦ on: a running period. */
+    daysLeft: "AI translation on · {n} days left",
+    oneDayLeft: "AI translation on · 1 day left",
+    /** ✦ on: the period starts with the first translation. */
+    notStarted: "AI translation on · {n} days from your first translation",
+    /** ✦ off. */
+    off: "Translation is off · Subscribe to turn it on",
+    /** ✦ off, an AI payment on its way. */
+    pending: "Payment on its way",
+    /** Not linked to a Discord account (the click links). */
+    link: "Link your Discord account to use Subline",
+    /** The plan panel's text for a subscription or a buyer: nothing to buy or enter (owner, 2026-10-25). */
+    onPanel: "AI translation is on for every message.",
+    /** The plan panel's title. */
+    panelTitle: "AI translation",
+    /** The plan panel's close button when there is nothing to buy (subscribed, a buyer, a payment on its way). */
+    ok: "OK",
+    /** The last-day notice, once per period (decision 12). Its button, and the inline "Later". */
+    lastDay: "Your AI translation ends tomorrow.",
+    subscribe: "Subscribe",
+    later: "Later",
+    /** The ended panel, once per period. {n}: 7, or 30 for a promo. */
+    endedTitle: "Your {n} days of AI translation have ended.",
+    endedBody: "Subscribe to keep reading every message in your language.",
+    notNow: "Not now",
+    /** The update panel, once, on the first start of 0.2.9 (decision 13). */
+    updateTitle: "Subline",
+    whatsNew: "What's new",
+    /** Owner, 2026-10-25. A subscription gets no update panel. */
+    update: {
+        /** Bought Automatic on 0.2.8. */
+        buyer: "Your plan now includes AI ✦ on everything, at no extra cost.",
+        /** A server code redeemed on 0.2.8: AI for good. */
+        promoKept: "Every translation is AI ✦ now.",
+        /** A server code redeemed on 0.2.9, its 30 days not started yet. */
+        promo: "Your server code gives you 30 days of AI from your first translation.",
+        /** A new install, or no plan yet: a welcome, not an update. {n}: 7. */
+        noPlan: "Your {n} days of AI translation start with the next message it translates."
+    },
+    /** The title over update.noPlan (it has no What's new: there is no change to read about). */
+    welcomeTitle: "Welcome to Subline"
+} as const;
+
+/** The update panel's "What's new": Subline's public release notes (it exists today). */
+export const WHATS_NEW_URL = "https://github.com/subline-page/subline/releases";
 
 /** Where the device-limit sentence sends the reader to ask for a reset. */
 export const SUPPORT_EMAIL = "support@subline.page";
 
 /**
  * The small toggle at the end of a status or bio that is shown translated in
- * place. Its glyph says what is showing: the translation's own glyph (✦, or ≈
- * for Google's), or ↩ for the original. The label is its tooltip and its
+ * place. Its glyph says what is showing: the translation's own glyph (✦), or
+ * ↩ for the original. The label is its tooltip and its
  * screen-reader name, and says what a click does.
  */
 export const IN_PLACE_COPY = {
@@ -145,7 +197,7 @@ export const IN_PLACE_COPY = {
 /**
  * Names and pronouns (0.2.8, surfaces/namesUi.tsx): the hover tooltip's
  * label, what it says while the translation is on its way, and the ✦ button
- * (AI plans only).
+ * (while ✦ is on).
  */
 export const NAMES_COPY = {
     label: "Translation:",
@@ -189,7 +241,7 @@ export const LINK_COPY = {
 
 /**
  * EVERY BIND NAMES THE ACCOUNT (0.2.8 spec, decision 2): the confirm shown
- * before Buy Automatic, Add AI, a code, and a Link that would bind this
+ * before Subscribe, a code, and a Link that would bind this
  * computer's earlier plan. {name} is the Discord username, read locally
  * (UserStore), never sent.
  */
@@ -266,7 +318,7 @@ export const ELSEWHERE_COPY = {
     title: "Pay on another device",
     body: "Scan this code with your phone, or open the link on any device. Subline switches on here by itself.",
     done: "Done",
-    /** Add AI has two plans: which one to pay for elsewhere. */
+    /** There are two plans: which one to pay for elsewhere. */
     choose: "Pick a plan."
 } as const;
 

@@ -15,6 +15,6 @@
  * stale, so the two can never drift silently.
  */
 
-export const PLUGIN_VERSION = "0.2.8";
+export const PLUGIN_VERSION = "0.2.9";
 
-export const BUILD_ID = "5ac0b15b45ddf81a";
+export const BUILD_ID = "2d04d6f5c57bdfb9";

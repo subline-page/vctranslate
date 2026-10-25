@@ -4,7 +4,8 @@ import { LocaleStore, React, UserStore } from "@webpack/common";
 
 
 import { APP_DOWNLOAD_URL } from "./appNotice";
-import { entitlementLevel, type Level, linkState, mustLink, subscribeEntitlement } from "./entitlement";
+import { entitlementLevel, getEntitlement, type Level, linkState, mustLink, subscribeEntitlement } from "./entitlement";
+import { planView, type PlanView } from "./planState";
 import { type LanguageSelectOption, targetLanguageOptions } from "./languages";
 import { isDesktop } from "./transport";
 import {
@@ -23,11 +24,9 @@ import { DEFAULT_GEMINI_MODEL, DEFAULT_GROQ_MODEL } from "./types";
  * hardcoded "en".
  *
  * Truncated to the primary subtag: Discord reports region-qualified tags
- * ("en-US", "pt-BR"), but google.ts decides "this message is already in the
- * target language" by comparing the target against the DETECTED language the
- * endpoint returns, which is a bare code ("en", "pt"). A region-qualified
- * target would therefore never match, and every message already in the user's
- * own language would be pointlessly translated.
+ * ("en-US", "pt-BR"), and the reading-language dropdown (languages.ts) and
+ * the local "already in the reader's language" checks (detectLang.ts) work on
+ * bare codes ("en", "pt").
  *
  * LocaleStore is resolved asynchronously by Vencord's webpack search, so it can
  * legitimately still be undefined very early; "en" is the fallback.
@@ -38,39 +37,36 @@ function defaultTargetLang(): string {
     return locale.split("-")[0].toLowerCase();
 }
 
-/** The engine value a Subline code turns on. Same string the installer seeds (RELAY_ENGINE). */
+/** The one engine (0.2.9, AI only). Same string the installer seeds (RELAY_ENGINE). */
 export const RELAY_ENGINE = "relay";
-/** The engine a blank code falls back to: Google (≈) for an Automatic owner, nothing for an install that is not activated. */
-export const FREE_ENGINE = "google";
 
 /**
- * Pasting a code is all it takes to turn ✦ on, and clearing it turns it off.
- *
- * The installer writes `engine: "relay"` alongside the code it saves, but a
- * code pasted here used to leave Engine on Google, so ✦ stayed off until the
- * user also found the Engine dropdown. Clearing the code switches back to
- * Google rather than leaving the relay selected with nothing to send: that
- * state is treated as free anyway (effectiveEngine falls back to Google), but
- * it also shows a red "no Subline code set" toast.
+ * A code changed. The engine is the relay whatever the code (0.2.9, spec
+ * decision 1): the code only changes the credential the relay sees (the
+ * install bearer stands in when there is none). A value an older build
+ * stored ("google", a bring-your-own-key engine) is moved to the relay here
+ * too, so no old setting can select an engine this build does not run.
  *
  * Reads the store rather than the argument: Vencord writes the value before
  * it calls onChange, and the store is what every other reader sees.
  */
 function syncEngineToCode(): void {
-    const raw = settings.store.sublineCode;
-    const code = typeof raw === "string" ? raw.trim() : "";
-    const engine = settings.store.engine;
-    if (code !== "" && engine !== RELAY_ENGINE) {
-        settings.store.engine = RELAY_ENGINE;
-    } else if (code === "" && engine === RELAY_ENGINE) {
-        settings.store.engine = FREE_ENGINE;
-    }
+    if (settings.store.engine !== RELAY_ENGINE) settings.store.engine = RELAY_ENGINE;
     notifySettingsChanged();
 }
 
-/** The one line that says what this install has. */
-export function planLine(level: Level): string {
-    return level === "ai" ? SETTINGS_COPY.plan.ai : level === "automatic" ? SETTINGS_COPY.plan.automatic : SETTINGS_COPY.plan.none;
+/**
+ * What this install has, as the ✦ button says it (planState.ts): the same
+ * sentence as its hover text, so Subline → Settings shows the state where
+ * there is no ✦ button (a channel without a message box, or the button
+ * hidden by the reader). Never throws: a bad read is "off".
+ */
+export function planViewNow(level: Level = entitlementLevel()): PlanView {
+    try {
+        return planView({ entitlement: getEntitlement(), level, now: Date.now(), linkNeeded: false, paymentPending: isPaymentPending() });
+    } catch {
+        return planView({ entitlement: null, level: "none", now: Date.now(), linkNeeded: false, paymentPending: false });
+    }
 }
 
 const LINK_STYLE = { cursor: "pointer", color: "var(--text-link, #00a8fc)" } as const;
@@ -96,9 +92,9 @@ function signedInName(): string {
 
 /**
  * The plan card at the top of the page: which Discord account Subline is
- * linked to, what it has, the saved code (selectable, no Copy button), and the action
- * that helps: Link while the account is not linked; Buy Automatic / Enter a
- * code when there is nothing; Add AI for an Automatic owner. Redraws when the
+ * linked to, what it has (the ✦ button's words), the saved code (selectable,
+ * no Copy button), and the actions: Link while the account is not linked;
+ * otherwise Subscribe (unless subscribed) and Enter a code. Redraws when the
  * relay's answer changes. 0.2.8: a plan from before still to link says so
  * (its plan works); the account that has the plan can move it; in the
  * browser add-on, the Discord app is offered. Never throws into Discord:
@@ -139,7 +135,8 @@ export function PlanCard() {
         rows.push(React.createElement("div", { key: "mustLink", style: { ...muted, marginBottom: 4 }, "data-subline-must-link": "" },
             LINK_COPY.mustLinkNotice, ". ", link(SETTINGS_COPY.plan.link, openLinkFromSettings)));
     }
-    rows.push(React.createElement("div", { key: "plan", style: normal }, planLine(level)));
+    const view = planViewNow(level);
+    rows.push(React.createElement("div", { key: "plan", style: normal, "data-subline-plan": view.state, ...(view.state === "pending" ? { "data-subline-payment-pending": "" } : {}) }, view.hover));
     if (code !== "") {
         rows.push(React.createElement("div", { key: "code", style: { ...muted, display: "flex", gap: 8, alignItems: "center", marginTop: 4 } },
             SETTINGS_COPY.plan.codeLabel, " ",
@@ -148,13 +145,13 @@ export function PlanCard() {
             React.createElement("code", { style: { userSelect: "all" } }, code)
         ));
     }
+    // Subscribe (the plan panel) unless the plan is already the paid one;
+    // "Enter a code" at every level (0.2.9 spec, decision 15). P4: no
+    // Subscribe while a payment is on its way (the plan line says so).
     const actions: any[] = [];
-    // P4: while a payment is on its way, plain words in place of the buy link.
-    const buy = (text: string) => isPaymentPending()
-        ? React.createElement("span", { "data-subline-payment-pending": "" }, SETTINGS_COPY.plan.paymentPending)
-        : link(text, openUpgrade);
-    if (level === "none") actions.push(buy(SETTINGS_COPY.plan.buyAutomatic), " · ", link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
-    else if (level === "automatic") actions.push(buy(SETTINGS_COPY.plan.addAi));
+    if (view.state !== "subscribed" && view.state !== "pending") actions.push(link(SETTINGS_COPY.plan.subscribe, openUpgrade), " · ");
+    // Not for a paid plan: a code adds nothing there (the relay refuses it).
+    if (view.state !== "subscribed") actions.push(link(SETTINGS_COPY.plan.enterCode, openCodeEntryFromSettings));
     if (actions.length > 0) rows.push(React.createElement("div", { key: "actions", style: { ...muted, marginTop: 4 } }, ...actions));
     const finishing = finishMove();
     if (finishing !== null) rows.push(finishing);
@@ -189,20 +186,14 @@ function openAppDownload(): void {
 export const settings = definePluginSettings({
     engine: {
         type: OptionType.SELECT,
-        // Not "the translator" any more: Google always runs first on every
-        // message and is what puts the ≈ line on screen in about a second,
-        // whatever is picked here. This setting only chooses what re-translates
-        // that line with conversation context afterwards (✦).
-        description: "Quality engine. Google always translates first (≈); this re-translates it with context (✦)",
-        // ONLY Google (free) and the Subline code (relay). Bring-your-own-key
-        // engines are deliberately NOT offered: they would let anyone self-serve
-        // ✦ AI with a free provider key and never need a code, which defeats the
-        // whole model (free ≈ Google, or a code for ✦ AI). The claude/gemini/groq
-        // engine code still exists, unreachable, for the test suite; there is no
-        // way into it from a shipped build. See tests/settings.test.ts.
+        // Hidden (below), and only one value since 0.2.9: AI only, no Google
+        // (spec decision 1). Bring-your-own-key engines are deliberately NOT
+        // offered: they would let anyone self-serve ✦ AI with a provider key.
+        // The claude/gemini/groq engine code still exists, unreachable
+        // (native.ts refuses them). See tests/settings.test.ts.
+        description: "Translation engine",
         options: [
-            { label: "Google (≈)", value: "google", default: true },
-            { label: "Subline (keyless AI, just paste your code)", value: "relay" }
+            { label: "Subline", value: RELAY_ENGINE, default: true }
         ],
         // engine is captured by value when the batcher is built, so a change
         // here must rebuild it (see settingsBridge.ts / index.tsx).
@@ -315,7 +306,7 @@ export const settings = definePluginSettings({
         // key with NO allowance for a model gets a 429 on its very first
         // request — indistinguishable from being throttled unless the user is
         // told what to try. The previous hardcoded default did exactly that
-        // for days: every subtitle stayed Google's ≈ and nothing said why.
+        // for days: no ✦ line ever arrived and nothing said why.
         description:
             `Gemini model (default ${DEFAULT_GEMINI_MODEL}). If ✦ upgrades stop appearing and you ` +
             "keep seeing a rate-limit toast, this model may no longer be available on your key. " +
@@ -442,9 +433,9 @@ export const settings = definePluginSettings({
     }
 }, {
     engine: {
-        // Hidden: the engine follows the code by itself (syncEngineToCode). A
-        // code turns the relay on and clearing it turns Google back on, so there
-        // is nothing for the reader to choose. The value stays for the plugin.
+        // Hidden: the relay is the one engine (syncEngineToCode, and
+        // index.tsx normaliseEngineSetting at start). There is nothing for
+        // the reader to choose. The value stays for the plugin.
         hidden: () => true
     },
     sublineCode: {
