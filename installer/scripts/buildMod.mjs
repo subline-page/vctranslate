@@ -74,6 +74,7 @@ import { carryMarkerOnHostUpdate, PERSIST_FILE } from "./vencordRewrites.mjs";
 import {
     BUILD_DIR,
     brandSettings,
+    fixUpstreamPatchSources,
     fail,
     installPlugin,
     log,
@@ -202,6 +203,9 @@ function main() {
 
     log("3d/6 Carrying Subline's marker through Vencord's host-update repatch");
     log(`     ${carryMarker()}`);
+
+    log("3e/6 Widening Vencord patches Discord's newer code broke");
+    log(`     ${fixUpstreamPatchSources()}`);
 
     log("4/6  Installing Vencord's dependencies and building");
     pnpm(["install", "--frozen-lockfile"]);

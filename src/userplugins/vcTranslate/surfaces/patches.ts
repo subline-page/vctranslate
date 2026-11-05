@@ -94,7 +94,8 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
             {
                 // The thread row's name: the props of Discord's own
                 // OverflowTooltip, exactly { children } for anyone not paid.
-                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/medium",color:"none",className:\i\.\i,children:\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,)children:(\i)\}/,
+                // PTB 661871 / Canary 661900 (2026-11-03) renamed text-* variants to body-*; both match.
+                match: /(__invalid_threadMainContent\),children:\[\(0,\i\.jsx\)\(\i\.\i,\{variant:"(?:text|body)-sm\/medium",color:"none",className:\i\.\i,children:\(0,\i\.jsx\)\(\i\.\i,\{"aria-hidden":!0,)children:(\i)\}/,
                 replace: "$1...$self.threadTitleProps($2,arguments[0]?.thread)}"
             }
         ]
@@ -155,7 +156,8 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
                 // The status text: `null!=r?<Text …>{r}</Text>:null`, then the
                 // placeholder. arguments[0] is the bubble's props (its
                 // forwardRef body): who it belongs to rides on them (below).
-                match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
+                // PTB 661871 / Canary 661900 (2026-11-03) renamed text-* variants to body-*; both match.
+                match: /(\i=null!=(\i)\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"(?:text|body)-sm\/normal",className:\i\.\i,children:)\2\}\):null,(?=\i=void 0!==)/,
                 replace: "$1$self.statusBubbleText($2,arguments[0])}):null,"
             },
             {
@@ -292,7 +294,8 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
         replacement: [{
             // The card's text column: [title, description or null]. One child
             // is appended; the option record is the one the title reads.
-            match: /(\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-md\/medium",color:"text-strong",children:(\i)\.title\}\),\2\.description\.length>0\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"text-xs\/normal",color:"text-default",children:\2\.description\}\):null)\]/,
+            // PTB 661871 / Canary 661900 (2026-11-03) renamed text-* variants to body-*; both match.
+            match: /(\(0,\i\.jsx\)\(\i\.\i,\{variant:"(?:text|body)-md\/medium",color:"text-strong",children:(\i)\.title\}\),\2\.description\.length>0\?\(0,\i\.jsx\)\(\i\.\i,\{variant:"(?:text|body)-xs\/normal",color:"text-default",children:\2\.description\}\):null)\]/,
             replace: "$1,$self.onboardingOptionLines($2)]"
         }]
     }

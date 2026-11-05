@@ -40,6 +40,7 @@ import { guardSecondVencord, seedWebSettings, WEB_STUB_FILE } from "./vencordRew
 import {
     BUILD_DIR,
     brandSettings,
+    fixUpstreamPatchSources,
     fail,
     INSTALLER_DIR,
     installPlugin,
@@ -275,6 +276,7 @@ async function main() {
     log(`     ${installPlugin()} plugin files`);
     log(`     kept ${prunePlugins()}, removed the rest`);
     log(`     ${brandSettings()}`);
+    log(`     ${fixUpstreamPatchSources()}`);
 
     log("4/7  Enabling the plugin by default in the web settings store");
     const stubPath = join(VENCORD_DIR, ...WEB_STUB_FILE.split("/"));

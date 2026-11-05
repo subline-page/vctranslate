@@ -18,6 +18,7 @@ import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { shippedSources, STAMP_PATH } from "../../scripts/stampBuild.mjs";
+import { fixUpstreamPatches, UPSTREAM_PATCH_FIXES } from "./vencordRewrites.mjs";
 
 /** The name a failure is reported under ("build:mod", "build:web"). */
 let buildLabel = "build";
@@ -354,6 +355,25 @@ export function brandSettings() {
         fail("Settings section does not build subline_main after rebranding.");
     }
     return `1 entry (Subline), replacing Vencord's 7; unexported ${UNEXPORTED_TABS.join(", ")}`;
+}
+
+/**
+ * Vencord's own patches that Discord's newer code broke, widened in place
+ * (vencordRewrites.mjs UPSTREAM_PATCH_FIXES). Run after brandSettings, which
+ * rewrites settings.tsx too. Anchored: a pin that moved the code fails here.
+ */
+export function fixUpstreamPatchSources() {
+    const files = [...new Set(UPSTREAM_PATCH_FIXES.map(f => f.file))];
+    for (const file of files) {
+        const path = join(VENCORD_DIR, ...file.split("/"));
+        if (!existsSync(path)) fail(`Vencord's checkout has no ${file}; the layout has changed.`);
+        try {
+            writeFileSync(path, fixUpstreamPatches(file, readFileSync(path, "utf8")));
+        } catch (cause) {
+            fail(cause instanceof Error ? cause.message : String(cause));
+        }
+    }
+    return `${UPSTREAM_PATCH_FIXES.length} Vencord patches widened for Discord's newer code`;
 }
 
 export function prunePlugins() {

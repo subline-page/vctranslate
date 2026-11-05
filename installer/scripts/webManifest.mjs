@@ -25,7 +25,7 @@
  * decision 1; linking spec decision 11).
  * Set by hand with the release, like package.json's version.
  */
-export const ADDON_VERSION = "0.2.9";
+export const ADDON_VERSION = "0.2.10";
 
 export const ADDON_NAME = "Subline";
 export const ADDON_DESCRIPTION = "Translate Discord messages into your language, right in the chat.";
