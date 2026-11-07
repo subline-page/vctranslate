@@ -29,7 +29,8 @@ export const BRIDGE_METHODS = [
     "relayPatchHealth",
     "relaySendFeedback",
     "relayChannels",
-    "relayPrefs"
+    "relayPrefs",
+    "relayEvent"
 ] as const;
 
 export type BridgeMethod = typeof BRIDGE_METHODS[number];
@@ -110,7 +111,10 @@ const SIGNATURES: Record<BridgeMethod, readonly ArgKind[]> = {
     relayPatchHealth: ["string", "string"],
     relaySendFeedback: ["string", "string"],
     relayChannels: ["string", "string", "string?"],
-    relayPrefs: ["string", "string", "string?"]
+    relayPrefs: ["string", "string", "string?"],
+    // A funnel step or a heard-from answer: native.ts checks the name against
+    // its fixed list, so anything else is never sent.
+    relayEvent: ["string", "string", "string"]
 };
 
 /**
@@ -190,8 +194,9 @@ export interface Consent {
 /**
  * Run one call from Discord's page. Never throws: a refusal names its reason,
  * and the page side turns it into the method's ordinary failure answer. A
- * patch health report the user did not allow (`consent`) is not sent and
- * answers `false`, as an unsent report does on the desktop.
+ * patch health report, a funnel step or a heard-from answer the user did not
+ * allow (`consent`: interaction data, as the Firefox manifest declares it) is
+ * not sent and answers `false`, as an unsent one does on the desktop.
  */
 export async function route(native: NativeFunctions, message: unknown, sender: Sender, ownId: string, consent?: Consent): Promise<BridgeReply> {
     if (!isFromDiscord(sender, ownId)) return { ok: false, refused: "sender" };
@@ -207,7 +212,7 @@ export async function route(native: NativeFunctions, message: unknown, sender: S
     if (name === "translateBatch" && !(BROWSER_ENGINES as readonly string[]).includes(clean[0] as string)) {
         return { ok: true, value: ENGINE_UNAVAILABLE };
     }
-    if (name === "relayPatchHealth" && consent !== undefined && !(await consent.technical())) return { ok: true, value: false };
+    if ((name === "relayPatchHealth" || name === "relayEvent") && consent !== undefined && !(await consent.technical())) return { ok: true, value: false };
     try {
         return { ok: true, value: await native[name](undefined, ...clean) };
     } catch (err) {

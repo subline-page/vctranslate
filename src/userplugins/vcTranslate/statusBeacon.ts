@@ -38,6 +38,7 @@ import {
 import type { EngineId } from "./types";
 import { clearRecentErrors, noteRecentError } from "./recentErrors";
 import { isDesktop, transport } from "./transport";
+import { noteUsageError } from "./usageDays";
 
 const logger = new Logger("VcTranslate");
 
@@ -228,6 +229,8 @@ export function recordError(code: BeaconErrorCode, status?: number): void {
     lastError = { code, at: nowIso(), ...(status === undefined ? {} : { status }) };
     // The feedback box's list (recentErrors.ts): codes only, like this.
     noteRecentError(lastError);
+    // Its time only, for the review request's quiet day (usageDays.ts).
+    noteUsageError();
     scheduleWrite();
 }
 

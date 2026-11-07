@@ -197,13 +197,14 @@ export function isSameText(a: string, b: string): boolean {
  * at most this long, so a burst of quick lines leaves as one request of up to
  * QUALITY_MAX_BATCH messages.
  *
- * 3s (was 1.5s while Google put a ≈ line on screen first). With ✦ the only
- * engine the reader waits for this window, so it stays short; it is a fixed
- * window from the FIRST message, so a busy channel flushes at most every 3s,
+ * 4s (owner, 2026-10-26: more messages per request, less cost; was 3s, and
+ * 1.5s while Google put a ≈ line on screen first). With ✦ the only engine the
+ * reader waits for this window, so it stays short; it is a fixed window from
+ * the FIRST message, so a busy channel flushes at most every 4s,
  * sooner at the 25-message cap. Catch-up bypasses it entirely (flushNow)
  * because a backlog is already complete when it is queued. The request
  * ceiling itself is the relay's (per-code rate limit, the hidden daily
  * ceiling) and the client's rate gate, not this window.
  */
-export const QUALITY_DEBOUNCE_MS = 3_000;
+export const QUALITY_DEBOUNCE_MS = 4_000;
 export const QUALITY_MAX_BATCH = 25;

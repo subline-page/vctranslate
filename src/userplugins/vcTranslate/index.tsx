@@ -8,16 +8,17 @@ import definePlugin from "@utils/types";
 import { relaunch } from "@utils/native";
 import { copyToClipboard } from "@utils/clipboard";
 import {
-    ChannelStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, Menu, MessageStore,
-    Parser, React, SelectedChannelStore, UserStore
+    ChannelStore, ComponentDispatch, DraftStore, FluxDispatcher, GuildMemberStore, GuildRoleStore, LocaleStore, Menu, MessageActions, MessageStore,
+    Parser, React, ReactDOM, SelectedChannelStore, Tooltip, UserStore
 } from "@webpack/common";
+import ErrorBoundary from "@components/ErrorBoundary";
 import type { NavContextMenuPatchCallback } from "@api/ContextMenu";
 import type { Message } from "@vencord/discord-types";
 import { FEEDBACK_COPY, reportFor } from "./feedback";
-import { openReportModal } from "./feedbackPanel";
+import { openFeedbackModal, openReportModal } from "./feedbackPanel";
 
 import { CONTEXT_RING_SIZE, createBatcher, type Batcher } from "./batcher";
-import { forgetNotices, putNotice, takeNotice } from "./sublineNotice";
+import { forgetNotices, type NoticeSlot, noticePresent, noticeShownThisSession, putNotice, takeNotice } from "./sublineNotice";
 import { clipParentText, fitLlmRequest, joinParts, LLM_TEXT_MAX, partId, shrinkAfterRefusal, splitTextToLimit, withParentCopies } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
@@ -40,6 +41,7 @@ import {
 import { openLinkWindow, silentLinkAttempt } from "./link";
 import { runBrowserLink } from "./linkFallback";
 import { priceSeenApplies, sendEvent, setEventSource } from "./events";
+import { createClickGuard, pickLinkHintIds } from "./linkHint";
 import {
     type AccountView, askPairCode, fill, moveDate, openAccountConfirm, openElsewherePlanChoice, openMessage, openMoveHere, openMoveStart, openPayElsewhere,
     setPanelCrashHandler
@@ -48,10 +50,10 @@ import type { RelayRefusal } from "./native";
 import { contentHash, loadPreviewLedger, rememberPreview, type PreviewResult } from "./freePlan";
 import {
     acquireSlot, loadRateGateTuning, rateGateAvailable, rateGateSettings, rateGateWaitMs,
-    resetRateGate, tryAcquireIdleSlot, tuneRateGateToObservedLimit
+    resetRateGate, takePrioritySlot, tryAcquireIdleSlot, tuneRateGateToObservedLimit
 } from "./rateGate";
 import { languageLabel } from "./langLabel";
-import settings from "./settings";
+import settings, { RELAY_ENGINE } from "./settings";
 import { onSettingsChanged } from "./settingsBridge";
 import { toast, type ToastKind } from "./toast";
 import { shouldSkip } from "./skip";
@@ -65,7 +67,7 @@ import {
 } from "./statusBeacon";
 import { BUILD_ID, PLUGIN_VERSION, type BeaconErrorCode } from "./statusShape";
 import {
-    clearLanguage, clearStore, dropDeferred, getTranslation, invalidateMessage, loadPersistedTranslations, makeKey,
+    clearLanguage, clearStore, dropDeferred, getTranslation, invalidateMessage, isFromDisk, loadPersistedTranslations, makeKey,
     setTranslation, subscribe, type StoredTranslation
 } from "./store";
 import {
@@ -74,16 +76,28 @@ import {
 } from "./types";
 import { isRealTranslation, mayReplace, rankOf } from "./upgrade";
 import { createCheckoutFlow, type CheckoutFlow, type Plan, type ReservedTab, reserveTab } from "./checkout";
-import { isRtlLang, normalizeTargetLang } from "./languages";
+import { isRtlLang, languageNameRows, languageNames, normalizeTargetLang } from "./languages";
+import {
+    boxHolds, chooseSendInLang, loadSendIn, normalizeForCompare, noteChannelLanguage, type OutgoingResult, panelSections, type PanelSectionKey, searchLanguages, SendInQueue, sendInLang, sendInOn,
+    type StatusView, subscribeSendIn, turnSendInOff, typedMeanwhile
+} from "./sendIn";
+import { expectSent, forgetExpected, loadYouWrote, noteMessageCreated, subscribeYouWrote, youWroteEntry } from "./youWrote";
+import {
+    __resetSwap, canSwap, carryThrough, isLongOriginal, isShowingOriginal, isSnowflake, noteMessageEdited, redrawSwaps, subscribeMessageEdit, subscribeSwap, SWAP_ATTR,
+    swapCss, toggleOriginal
+} from "./inPlace";
 import { isPaymentPending, openUpgrade, registerUpgradeOpener, setPaymentPending, settingsShowing, subscribePaymentPending } from "./upgradeBridge";
-import { ACCOUNT_COPY, ADDON_RELOAD_COPY, FALLBACK_COPY, LINK_COPY, MOVE_COPY, PLAN_COPY, SUPPORT_EMAIL, UPGRADE_COPY, WHATS_NEW_URL } from "./upgradeCopy";
+import {
+    ACCOUNT_COPY, ADDON_RELOAD_COPY, CHROME_REVIEWS_URL, FALLBACK_COPY, LINK_COPY, MESSAGE_SWAP_COPY, MOVE_COPY, PLAN_COPY, REVIEW_COPY, SEND_IN_COPY, SHARE_COPY, SUPPORT_EMAIL,
+    UPGRADE_COPY, WHATS_NEW_URL
+} from "./upgradeCopy";
 import { emptyNotes, endedDue, lastDayDue, notesFrom, type PlanNotes, planView, type PlanView, updateTextFor, withNote } from "./planState";
 import { accessFrom, NEW_DAYS_FALLBACK } from "./planAccess";
 import {
     closePanel, type CodeSubmitResult, openCodeEntry, openEndedPanel, openPlanPanel, openUpdatePanel
 } from "./upgradePanel";
 import { createUpdateWatch, isReleaseNotesUrl, releaseNotesUrl, UPDATE_CHECK_INTERVAL_MS, UPDATE_NOTICE_COPY, type UpdateWatch } from "./updateNotice";
-import { buildNumberFromVencord, createPatchHealthWatch, HEALTH_STORE_KEY, runPatchHealthCheck, scanFromVencord, type PatchHealthWatch } from "./patchHealth";
+import { buildNumberFromVencord, createPatchHealthWatch, HEALTH_STORE_KEY, patchInDiscord, runPatchHealthCheck, scanFromVencord, type PatchHealthWatch } from "./patchHealth";
 import { APP_DOWNLOAD_URL, APP_NOTICE_COPY, checkAppNotice } from "./appNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
@@ -103,7 +117,11 @@ import {
     useSurfaceVersion
 } from "./surfaces/ui";
 import { __resetWeeklyStats, closeWeekIfDue, countShown, loadWeeklyStats } from "./weeklyNote";
-import { isDesktop, onWebAddonGone, transport } from "./transport";
+import { isDesktop, isFirefox, onWebAddonGone, transport } from "./transport";
+import { __resetUsage, currentUsage, lastNoticeTime, loadUsage, markReviewAsked, noteNoticeShown, noteUsageDay, priorUse, readPriorData, reviewDue, settingsShowPriorUse } from "./usageDays";
+import { shareCard } from "./shareCard";
+import { openSharePreview, setShareLog } from "./sharePanel";
+import { recentErrorCodes } from "./recentErrors";
 
 const logger = new Logger("VcTranslate");
 
@@ -1164,6 +1182,7 @@ function startSilentLink(): boolean {
  */
 function startLink(): void {
     if (linkBusy) return;
+    noteWindowShown();
     // The window broke once this session: straight to the browser, inside
     // this click (in a browser the fallback's tab can open only here).
     if (authorizeWindowBroken) {
@@ -1712,6 +1731,7 @@ function finishMoveFromSettings(): void {
 /** The new account's Authorize for a move: the window inside Discord, else the browser. */
 function authorizeMove(ticket: string): void {
     if (linkBusy) return;
+    noteWindowShown();
     if (authorizeWindowBroken) {
         void runFallback(ticket, reserveFallbackTab());
         return;
@@ -1985,6 +2005,8 @@ function showUpdateNotice(version: string | null): void {
             </a>
         </span>
     );
+    // A Subline notice like the others: no ask this session, none for 7 days (usageDays.ts).
+    noteWindowShown();
     showNotice(display as Parameters<typeof showNotice>[0], UPDATE_NOTICE_COPY.button, relaunch);
 }
 
@@ -2394,6 +2416,7 @@ function announcePurchase(): void {
     // An early user did not buy anything: thank them instead.
     const early = earlyGrantPending;
     earlyGrantPending = false;
+    noteWindowShown();
     showNotice(early ? UPGRADE_COPY.earlyNotice : UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
 }
 
@@ -2408,6 +2431,7 @@ function openUpgradeForLevel(): void {
 
 /** openUpgradeForLevel; `asked`: the relay was just asked (askThenOpenUpgrade), so it is not asked again. */
 function openUpgradeFor(asked: boolean): void {
+    noteWindowShown();
     // Not linked: Link first. Buying or a code would only be refused.
     if (linkNeeded()) {
         linkFromSettings();
@@ -3276,6 +3300,7 @@ function listenForTyping(on: boolean): void {
 
 /** "Your AI translation ends tomorrow." with Subscribe, and "Later" inline (a notice has one button). */
 function showLastDayNotice(): void {
+    noteWindowShown();
     const later = () => takeNotice("plan");
     const display = (
         <span>
@@ -3308,6 +3333,7 @@ function maybeShowUpdatePanel(): boolean {
     if (text === null) return false;
     if (!openUpdatePanel(text, openWhatsNew)) return false;
     updatePanelShown = true;
+    noteWindowShown();
     void DataStore.set(UPDATE_PANEL_KEY, true).catch(() => { });
     return true;
 }
@@ -3331,7 +3357,10 @@ function checkPlanMessages(trigger: "start" | "switch" | "change"): void {
         if (maybeShowUpdatePanel()) return;
         if ((trigger === "start" || trigger === "switch") && endedDue(view, planNotes)) {
             const opened = openEndedPanel(view.periodDays ?? NEW_DAYS_FALLBACK, plan => withAccountConfirm(() => startCheckout(plan)));
-            if (opened) notePlan("ended", view.periodId!);
+            if (opened) {
+                notePlan("ended", view.periodId!);
+                noteWindowShown();
+            }
         }
     } catch (e) {
         logger.warn(`the plan messages failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -3343,6 +3372,112 @@ function checkPlanAtStart(): void {
     if (planStartChecked || !planMessagesOn || planNotesKey === null) return;
     planStartChecked = true;
     checkPlanMessages("start");
+}
+
+/* ------------------------------------------------------ the two asks -- */
+
+/*
+ * THE ASK, ONCE PER COMPUTER, EVER: the review request (usageDays.ts).
+ * "Where did you hear about Subline?" is never asked in Discord (owner,
+ * 2026-11-06: it blocks people who already use Subline). At most one ask
+ * per session, only at a channel switch, never while typing, and
+ * never in a session that showed a Subline window, the Link, a plan message
+ * or any other Subline notice: the plan comes first, and an ask never sits
+ * next to a sale. Each is marked as asked in storage before it shows.
+ */
+
+/** A Subline window, plan message or ask showed this session. */
+let windowShownThisSession = false;
+/** An ask is being marked (an await): no second one meanwhile. */
+let askRunning = false;
+
+function noteWindowShown(): void {
+    windowShownThisSession = true;
+    // And for 7 days, across restarts: the review request waits (usageDays.ts).
+    noteNoticeShown();
+}
+
+const OWN_NOTICES: readonly NoticeSlot[] = ["activation", "checking", "appUpdate", "link", "paused", "plan", "review"];
+
+function askSessionBusy(): boolean {
+    // Shown, not only present: a notice closed with its X still counts.
+    return windowShownThisSession || askRunning || noticeShownThisSession() || OWN_NOTICES.some(noticePresent);
+}
+
+/** At a channel switch: one of the two asks, if one is due. Never throws. */
+function checkAsks(): void {
+    if (!planMessagesOn) return;
+    try {
+        const busySession = askSessionBusy();
+        const typing = typingNow();
+        const view = currentPlanView();
+        const plan = view.state;
+        const usage = currentUsage();
+        const errorTimes = recentErrorCodes().map(e => e.at);
+        const lastNoticeAt = lastNoticeTime();
+        if (reviewDue({ usage, now: Date.now(), plan, daysLeft: view.daysLeft, errorTimes, typing, busySession, lastNoticeAt })) void askReview();
+    } catch (e) {
+        logger.warn(`the asks failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+}
+
+/**
+ * "Is Subline useful to you?" In Chrome (and the other Chromium browsers):
+ * the Chrome Web Store's reviews page (the add-on has one). On the desktop,
+ * and in Firefox, which cannot review on the Chrome store: the feedback box.
+ * "No thanks" closes it.
+ */
+async function askReview(): Promise<void> {
+    askRunning = true;
+    noteWindowShown();
+    try {
+        if (!await markReviewAsked()) return;
+        if (!planMessagesOn) return;
+        showReviewNotice(!isDesktop() && !isFirefox());
+    } finally {
+        askRunning = false;
+    }
+}
+
+function showReviewNotice(store: boolean): void {
+    const text = store ? REVIEW_COPY.storeNotice : REVIEW_COPY.desktopNotice;
+    const noThanks = () => takeNotice("review");
+    const display = (
+        <span>
+            {text}{" "}
+            <a
+                role="button"
+                onClick={noThanks}
+                style={{ marginLeft: 6, textDecoration: "underline", cursor: "pointer", color: "inherit" }}
+            >
+                {REVIEW_COPY.noThanks}
+            </a>
+        </span>
+    );
+    putNotice("review", text, store ? REVIEW_COPY.storeButton : REVIEW_COPY.desktopButton, () => {
+        takeNotice("review");
+        if (store) openReviewPage();
+        else if (!openFeedbackModal(REVIEW_COPY.feedbackTitle)) logger.warn("the feedback box could not open from the review request");
+    }, false, display);
+}
+
+/**
+ * The store's reviews page in a new tab, inside the click (a browser opens
+ * tabs only there). Not with "noopener": window.open then answers null even
+ * when the tab opened, and a block could not be told apart. The tab's opener
+ * is cut instead, as checkout.ts reserveTab does.
+ */
+function openReviewPage(): void {
+    try {
+        const tab = (globalThis as any).open?.(CHROME_REVIEWS_URL, "_blank");
+        if (!tab) {
+            logger.warn("the browser blocked the store's reviews page");
+            return;
+        }
+        try { tab.opener = null; } catch { /* the tab still works */ }
+    } catch (e) {
+        logger.warn(`the store's reviews page did not open: ${e instanceof Error ? e.message : String(e)}`);
+    }
 }
 
 /**
@@ -3389,6 +3524,11 @@ function coveredByGlobalAuto(channelId: string): boolean {
 function channelActive(channelId: string): boolean {
     // Nothing paid for: no channel translates.
     if (!activated()) return false;
+    return channelSwitchedOn(channelId);
+}
+
+/** The reader's own switches for this channel, whatever the plan: would it translate once paid for? */
+function channelSwitchedOn(channelId: string): boolean {
     // A covered server channel is on unless the user switched it off here.
     if (coveredByGlobalAuto(channelId)) return !isChannelDisabled(channelId);
     // Anything else (globalAuto off, or a DM) is on only by explicit opt-in.
@@ -3448,6 +3588,8 @@ function writeResult(key: string, value: StoredTranslation): void {
             if (!isRealTranslation(existing)) {
                 showWeeklyNoteIfDue();
                 countShown(value.lang);
+                // The review request's days (usageDays.ts): today, once.
+                noteUsageDay();
             }
         }
     }
@@ -3940,6 +4082,8 @@ async function runTier(
             }
             const value: StoredTranslation = { lang: r.lang, text: r.text, via: ENGINE };
             writeResult(key, value);
+            // Send in (sendIn.ts): the channel's main language, learned for nothing.
+            if (channelId !== undefined) noteChannelLanguage(channelId, r.lang, req.targetLang);
             // P7: stored by the same rule it is reused by. A reply's line was
             // read against its parent, so it must never answer a non-reply.
             if (phraseReusable(sent)) rememberPhrase(sent.text, req.targetLang, value);
@@ -4743,6 +4887,10 @@ function contextBefore(message: any, size: number): { author: string; text: stri
 }
 
 function onMessageCreate({ message, optimistic }: { message: Message; optimistic?: boolean; }) {
+    // Send in's "You wrote" (youWrote.ts): the reader's own message it sent.
+    try { noteMessageCreated(message, UserStore.getCurrentUser()?.id, optimistic === true); } catch { /* the line only */ }
+    // Send in: did this message leave without the pre-send hook?
+    sendInCanary(message, optimistic === true);
     if (optimistic || !message?.id) return;
     if (typeof message.content === "string") rememberSeenText(message.id, message.content);
     if (!channelActive(message.channel_id)) return;
@@ -4758,6 +4906,9 @@ function onMessageCreate({ message, optimistic }: { message: Message; optimistic
 
 function onMessageUpdate({ message }: { message: Message; }) {
     if (!message?.id) return;
+    // Discord does not redraw a message's accessories for a new text: the
+    // in-place text and the line under it redraw from here.
+    noteMessageEdited(message.id);
 
     // MESSAGE_UPDATE is not only fired for user edits. It also fires when a
     // link preview loads, an attachment finishes or a pin changes. Discord now
@@ -5003,6 +5154,8 @@ function onChannelSelect({ channelId }: { channelId: string; }) {
     void channelOpened(channelId);
     // The ended panel waits for a channel switch (decision 12).
     checkPlanMessages("switch");
+    // After the plan's own messages, which come first.
+    checkAsks();
 }
 
 // CHANNEL_SELECT fires before Discord has necessarily fetched the backlog
@@ -5147,6 +5300,113 @@ function previewLine(preview: PreviewResult) {
     );
 }
 
+/* ----------------------------------------------------------- link line -- */
+
+/*
+ * THE LINK LINE (0.2.11, linkHint.ts). While this Discord account is not
+ * linked, the newest message in the open channel that Subline would
+ * translate carries "Link your Discord account to translate · Link". The
+ * second way in, beside the Link bar: always on screen where the reader
+ * looks, even when the bar was closed, missed, or broken by Discord.
+ */
+
+const linkHintListeners = new Set<() => void>();
+/** Bumped on every message event, so a channel's answer is worked out again. */
+let linkHintVersion = 0;
+let linkHintTimer: ReturnType<typeof setTimeout> | null = null;
+/** What moves the line: a message came, changed, went, or history loaded. */
+const LINK_HINT_EVENTS = ["MESSAGE_CREATE", "MESSAGE_UPDATE", "MESSAGE_DELETE", "MESSAGE_DELETE_BULK", "LOAD_MESSAGES_SUCCESS"] as const;
+const linkHintCache = new Map<string, { stamp: string; ids: string[]; }>();
+
+function subscribeLinkHint(fn: () => void): () => void {
+    linkHintListeners.add(fn);
+    return () => { linkHintListeners.delete(fn); };
+}
+
+/**
+ * A message came, went, changed, or a page of history loaded: which message
+ * carries the line may have moved. Run after Discord's own stores took the
+ * event in (the next tick), once for a burst. Lines redraw only while the
+ * line can show at all.
+ */
+function onLinkHintMessages(): void {
+    if (linkHintTimer !== null) return;
+    linkHintTimer = setTimeout(() => {
+        linkHintTimer = null;
+        linkHintVersion++;
+        linkHintCache.clear();
+        if (!linkNeeded()) return;
+        for (const fn of [...linkHintListeners]) {
+            try { fn(); } catch { /* a listener's failure is its own */ }
+        }
+    }, 0);
+}
+
+/** The ids in this channel that carry the line. Local only: no request of any kind. */
+function linkHintIdsFor(channelId: string): string[] {
+    const me = UserStore.getCurrentUser()?.id;
+    const store = MessageStore.getMessages(channelId) as any;
+    if (!store || typeof store.toArray !== "function") return [];
+    const all: any[] = store.toArray();
+    const stamp = `${linkHintVersion}|${all.length}|${all[all.length - 1]?.id ?? ""}|${settings.store.targetLang}|${me ?? ""}`;
+    const cached = linkHintCache.get(channelId);
+    if (cached !== undefined && cached.stamp === stamp) return cached.ids;
+    // Not the reader's own (pickLinkHintIds drops those), so isOwn is false.
+    const ids = pickLinkHintIds(all, me, text => !isLocallySkipped(text, false));
+    if (linkHintCache.size > 50) linkHintCache.clear();
+    linkHintCache.set(channelId, { stamp, ids });
+    return ids;
+}
+
+/** A double click, or a press while a link runs, starts nothing more. */
+const LINK_HINT_CLICK_GAP_MS = 2_000;
+let linkHintGuard = createClickGuard(LINK_HINT_CLICK_GAP_MS);
+
+/** The line's Link: the same flow as the Link bar's button (linkFromSettings). */
+function linkHintClick(e?: { preventDefault?: () => void; }): void {
+    try { e?.preventDefault?.(); } catch { /* nothing to prevent */ }
+    linkHintGuard(
+        () => linkBusy || silentRunningFor !== null || !linkNeeded(),
+        linkFromSettings
+    );
+}
+
+/** The link line for this message, or null. Hook-free; never throws. */
+function linkHintLine(message: Message) {
+    try {
+        if (!linkNeeded()) return null;
+        // The silent link is still trying: as for the bar, nothing shows yet.
+        if (silentRunningFor !== null) return null;
+        if (isFeatureOff("messages")) return null;
+        const channelId = message?.channel_id;
+        if (typeof channelId !== "string" || channelId === "" || typeof message.id !== "string") return null;
+        if (!isFocusedChannel(channelId) || !channelSwitchedOn(channelId)) return null;
+        if (isCurrentUser(message.author?.id)) return null;
+        if (!linkHintIdsFor(channelId).includes(message.id)) return null;
+        // Once a session at most (events.ts), the same step as the bar.
+        sendEvent("link_prompt");
+        return (
+            <div
+                style={{ fontSize: "0.85rem", color: "var(--text-muted)", fontStyle: "italic" }}
+                data-subline-link-hint=""
+            >
+                {LINK_COPY.hint}{" · "}
+                <a
+                    role="button"
+                    tabIndex={0}
+                    style={{ fontStyle: "normal", fontWeight: 500, color: "var(--text-link)", cursor: "pointer" }}
+                    onClick={linkHintClick}
+                >
+                    {LINK_COPY.button}
+                </a>
+            </div>
+        );
+    } catch (err) {
+        logger.warn("The link line could not be worked out.", err);
+        return null;
+    }
+}
+
 function TranslationAccessory({ message }: { message: Message; }) {
     const [, forceUpdate] = React.useReducer((n: number) => n + 1, 0);
 
@@ -5160,15 +5420,34 @@ function TranslationAccessory({ message }: { message: Message; }) {
         const unsubForced = subscribeForcedInFlight(forceUpdate);
         // A channel switched on or off (here, or on another computer).
         const unsubChannels = subscribeChannels(forceUpdate);
+        // Linked (the link line goes at once), and which message carries it.
+        const unsubEntitlement = subscribeEntitlement(forceUpdate);
+        const unsubLinkHint = subscribeLinkHint(forceUpdate);
+        // A long message's translation drawn in its place (InPlaceAccessory),
+        // its "Show original", and an edit Discord does not redraw us for.
+        const unsubSwap = subscribeSwap(forceUpdate);
+        const unsubEdit = typeof message?.id === "string" ? subscribeMessageEdit(message.id, forceUpdate) : () => { };
         return () => {
             unsubStore();
             unsubForced();
             unsubChannels();
+            unsubEntitlement();
+            unsubLinkHint();
+            unsubSwap();
+            unsubEdit();
         };
     }, []);
 
+    // Not linked: nothing translates (channelActive is false), and the newest
+    // message that would carries the Link line.
+    const hint = linkHintLine(message);
+    if (hint !== null) return hint;
     if (isFeatureOff("messages")) return null;
     if (!channelActive(message.channel_id)) return null;
+    // A long message: its translation is drawn in its place, or the reader
+    // asked for the original back. Nothing here then, but a decoded line.
+    const swap = isCurrentUser(message?.author?.id) ? null : inPlaceView(liveMessage(message));
+    if (swap !== null && swap.kind !== "sentIn") return withDecodedLine(message, null);
     return withDecodedLine(message, translationLines(message));
 }
 
@@ -5401,6 +5680,403 @@ function translationLines(message: Message) {
     );
 }
 
+/* ------------------------------------------------- long messages, in place -- */
+
+/*
+ * A LONG MESSAGE'S TRANSLATION IN ITS PLACE, and "(sent in …)" after the
+ * reader's own message Send in sent (owner, 0.2.11). The rules and the
+ * mechanism are inPlace.ts. This accessory is placed FIRST among the
+ * message's accessories, so it sits where Discord's text was: above the
+ * images, embeds and reactions, which stay as they are.
+ */
+
+/** The accessory that draws a long message's translation in place, and "(sent in …)". */
+export const IN_PLACE_ACCESSORY_ID = "SublineInPlace";
+/** On while the plugin runs. stop() redraws every in-place text empty, so Discord's own text shows. */
+let inPlaceOn = false;
+
+type SwapView =
+    | {
+        kind: "translated"; id: string; channelId: string; parsed: unknown; plain: string; dir: "rtl" | "auto";
+        lang: string | null; edited: unknown; forcing: boolean; hint: ForcedHint | undefined;
+    }
+    | { kind: "original"; id: string; lang: string | null; }
+    | { kind: "sentIn"; id: string; channelId: string; parsed: unknown; plain: string; lang: string | null; wrote: string; edited: unknown; };
+
+/**
+ * The message as Discord has it now. Discord's accessories are not redrawn
+ * for a new text (their shouldComponentUpdate looks at attachments, embeds,
+ * reactions, not the text), so the accessory's own prop can be the record
+ * from before an edit.
+ */
+function liveMessage(message: Message): Message {
+    try {
+        const id = message?.id;
+        const channelId = message?.channel_id;
+        if (typeof id !== "string" || typeof channelId !== "string") return message;
+        return (MessageStore.getMessage(channelId, id) as Message | undefined) ?? message;
+    } catch {
+        return message;
+    }
+}
+
+/**
+ * Discord's markdown parser on a whole message's text, with the options
+ * Discord gives a message's text (checked in Discord's bundle, 2026-11-05:
+ * links, lists and headings on, formatInline off, so a code block draws as
+ * a block). Inline parsing, as the reply quotes here use: Discord's own
+ * code block, quote, list and heading rules match in it, and line breaks
+ * stay in the text (the container keeps them, white-space: break-spaces).
+ * Null on any throw.
+ */
+function parseMessageText(text: string, channelId: string, messageId: string): unknown {
+    try {
+        const out = Parser.parse(text, true, { channelId, messageId, allowLinks: true, allowList: true, allowHeading: true, formatInline: false, previewLinkTarget: true });
+        return out ?? null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Parsed swap texts, by message, channel and text. Every accessory of every
+ * message on screen asks for its view each time any translation lands; the
+ * parser runs once per text, not once per ask.
+ */
+const swapParseCache = new Map<string, unknown>();
+const SWAP_PARSE_KEPT = 200;
+
+function parsedSwapText(text: string, channelId: string, messageId: string): unknown {
+    const key = `${messageId}\u0000${channelId}\u0000${text}`;
+    if (swapParseCache.has(key)) return swapParseCache.get(key);
+    const parsed = parseMessageText(text, channelId, messageId);
+    // A failed parse is not kept: the next ask tries again.
+    if (parsed === null) return null;
+    swapParseCache.set(key, parsed);
+    if (swapParseCache.size > SWAP_PARSE_KEPT) swapParseCache.delete(swapParseCache.keys().next().value!);
+    return parsed;
+}
+
+/** A swap text as plain words: mentions as names, custom emoji as :name:. */
+function readablePlain(text: string, channelId: string): string {
+    try {
+        return renderDiscordMarkup(text, markupResolversFor(channelId));
+    } catch {
+        return text;
+    }
+}
+
+/** The stored translation of this message the accessories may show (an unknown engine's line is none). */
+function shownEntry(messageId: string): StoredTranslation | undefined {
+    const stored = getTranslation(makeKey(messageId, settings.store.targetLang));
+    return isRealTranslation(stored) && !Object.prototype.hasOwnProperty.call(ENGINE_PROVENANCE, stored.via) ? undefined : stored;
+}
+
+/** A language's English name ("Turkish"), or null for a code that names no language. */
+function englishLangName(code: unknown): string | null {
+    const label = languageLabel(code);
+    if (label === null) return null;
+    try {
+        const name = new Intl.DisplayNames(["en"], { type: "language" }).of(label);
+        return typeof name === "string" && name !== "" ? name : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * What the in-place accessory draws for this message, or null for nothing
+ * (then everything is as before: Discord's text, and the translation line
+ * under it). Never throws. Swapped only when every part of the swap is
+ * known to work: the browser hides by :has(), the id is a Discord id, the
+ * translation is real, non-empty, kept its code blocks and parsed.
+ */
+export function inPlaceView(message: Message): SwapView | null {
+    try {
+        if (!inPlaceOn || !canSwap()) return null;
+        const id = message?.id;
+        const channelId = message?.channel_id;
+        if (!isSnowflake(id) || typeof channelId !== "string") return null;
+        const content = typeof message.content === "string" ? message.content : "";
+        if (content.trim() === "" || isHiddenSuspended(message)) return null;
+        if (isFeatureOff("messages")) return null;
+        // The reader's own message: never translated; "(sent in …)" when Send in sent it.
+        if (isCurrentUser(message.author?.id)) return sentInView(message, id, channelId, content);
+        if (!channelActive(channelId) || !isLongOriginal(content)) return null;
+        const entry = shownEntry(id);
+        // A ⚡ preview while ✦ is off keeps its own line, as before.
+        if (previewFor(message) !== undefined && !(isRealTranslation(entry) && rankOf(entry.via) >= 1)) return null;
+        // Waiting, ⏳, ⚠, a skip, "nothing to translate": the original stays, no marker.
+        if (!isRealTranslation(entry) || entry.same === true) return null;
+        // A stored line from an earlier session, of a message edited since:
+        // it may describe words that are gone. Never in the original's place.
+        if (message.editedTimestamp != null && isFromDisk(entry)) return null;
+        // Everything the original shows that is not words (custom emoji,
+        // mentions, links, spoilers, timestamps, quotes, lists...) is in the
+        // text drawn, or nothing is swapped (inPlace.ts carryThrough).
+        const restored = restoreMarkup(entry.text.trim(), markupFor(content, channelId).tokens, content);
+        const full = restored === null ? null : carryThrough(content, restored.trim());
+        if (full === null) return null;
+        const parsed = parsedSwapText(full, channelId, id);
+        if (parsed === null || parsed === undefined || (Array.isArray(parsed) && parsed.length === 0)) return null;
+        // The plain text, only if Discord's parts throw while they draw: names, not ids.
+        const plain = readablePlain(full, channelId);
+        const lang = englishLangName(entry.lang);
+        if (isShowingOriginal(id)) return { kind: "original", id, lang };
+        const forcing = isForcedInFlight(id);
+        return {
+            kind: "translated", id, channelId, parsed, plain, dir: translationDir(), lang,
+            edited: message.editedTimestamp ?? null, forcing, hint: forcing ? undefined : forcedHintFor(id)
+        };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The reader's own message, sent by Send in: Discord's text drawn again with
+ * "(sent in Turkish)" after it. Not while Discord still sends it (its dimmed
+ * local copy) or after a failed send (its red text): Discord's own look.
+ */
+function sentInView(message: Message, id: string, channelId: string, content: string): SwapView | null {
+    const wrote = youWroteEntry(id);
+    if (wrote === undefined) return null;
+    const state = (message as { state?: unknown; }).state;
+    if (state !== undefined && state !== null && state !== "SENT") return null;
+    const parsed = parseMessageText(content, channelId, id);
+    if (parsed === null || (Array.isArray(parsed) && parsed.length === 0)) return null;
+    return {
+        kind: "sentIn", id, channelId, parsed, plain: content, lang: englishLangName(wrote.lang),
+        wrote: wrote.original, edited: message.editedTimestamp ?? null
+    };
+}
+
+/** Discord's own message text class (its "markup" class: code blocks, quotes, lists), read from Discord's text element once. */
+let markupClass: string | null = null;
+
+/** Find Discord's markup class on a text element near `from` (or any). True when found. */
+function findMarkupClass(from: HTMLElement | null, id: string): boolean {
+    try {
+        const article = from?.closest?.('[role="article"]');
+        const el = (article?.querySelector?.(`[id="message-content-${id}"]`)
+            ?? (typeof document !== "undefined" ? document.querySelector?.('[id^="message-content-"]') : null)) as HTMLElement | null | undefined;
+        const found = Array.from(el?.classList ?? []).find(c => /^markup(?:[_-]|$)/.test(c));
+        if (found === undefined) return false;
+        markupClass = found;
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/** The swapped text: Discord's message text look. The markup class adds code blocks and quotes when it is found. */
+const SWAP_TEXT_STYLE = {
+    fontSize: "1rem",
+    lineHeight: "var(--chat-markup-line-height, 1.375rem)",
+    whiteSpace: "break-spaces",
+    overflowWrap: "break-word",
+    color: "var(--custom-message-content-color, var(--text-default, var(--text-normal, #dbdee1)))",
+    userSelect: "text"
+} as const;
+/** The marker after it: Discord's "(edited)" (0.625rem, muted, a quarter rem after the text). */
+const SWAP_MARK_STYLE = {
+    fontSize: "0.625rem",
+    lineHeight: 1,
+    fontWeight: 400,
+    fontStyle: "normal",
+    color: "var(--text-muted, #949ba4)",
+    marginInlineStart: "0.25rem",
+    userSelect: "none",
+    whiteSpace: "nowrap",
+    verticalAlign: "baseline"
+} as const;
+/** The toggle's hover, which an inline style cannot say. */
+const SWAP_STATIC_CSS = ".subline-swap-toggle{cursor:pointer}.subline-swap-toggle:hover,.subline-swap-toggle:focus-visible{text-decoration:underline;color:var(--text-default,#dbdee1)}";
+
+/** Stops an event at the marker: the message's own click, hover and keys never see it. */
+function stopAtMark(e: any): void {
+    try { e?.stopPropagation?.(); } catch { /* nothing to stop */ }
+}
+
+/** "Show original" / "✦ Show translation": a click or Enter flips this message. */
+function SwapToggle({ id, label }: { id: string; label: string; }) {
+    const flip = (e: any) => {
+        stopAtMark(e);
+        try { e?.preventDefault?.(); } catch { /* nothing to prevent */ }
+        toggleOriginal(id);
+    };
+    return (
+        <span
+            role="button"
+            tabIndex={0}
+            className="subline-swap-toggle"
+            data-subline-swap-toggle=""
+            onMouseDown={stopAtMark}
+            onPointerDown={stopAtMark}
+            onClick={flip}
+            onKeyDown={(e: any) => {
+                stopAtMark(e);
+                if (e?.key === "Enter" || e?.key === " ") flip(e);
+            }}
+        >
+            {label}
+        </span>
+    );
+}
+
+/** Discord's "(edited)", said again: the original that carried it is hidden. */
+function EditedMark({ at }: { at: unknown; }) {
+    let title: string | undefined;
+    try {
+        const ms = Number((at as { valueOf?(): unknown; } | null)?.valueOf?.());
+        if (Number.isFinite(ms)) title = new Date(ms).toLocaleString();
+    } catch { /* no hover */ }
+    return <span style={SWAP_MARK_STYLE} title={title} data-subline-edited="">{MESSAGE_SWAP_COPY.edited}</span>;
+}
+
+/** "✦ Turkish · Show original", and a ⚡ click's state after it. */
+function SwapMark({ view }: { view: Extract<SwapView, { kind: "translated"; }>; }) {
+    const from = view.lang === null ? MESSAGE_SWAP_COPY.fromUnknown : MESSAGE_SWAP_COPY.from.replace("{lang}", () => view.lang!);
+    const title = view.lang === null ? MESSAGE_SWAP_COPY.titleUnknown : MESSAGE_SWAP_COPY.title.replace("{lang}", () => view.lang!);
+    const hint = view.hint ? forcedHintDisplay(view.hint) : null;
+    return (
+        <span style={SWAP_MARK_STYLE} dir="ltr" data-subline-swap-mark="">
+            <span title={title}>{from}</span>
+            {" · "}
+            <SwapToggle id={view.id} label={MESSAGE_SWAP_COPY.showOriginal} />
+            {view.forcing ? " · ⚡ translating…" : null}
+            {hint !== null ? <span title={hint.title}>{` · ${hint.text}`}</span> : null}
+        </span>
+    );
+}
+
+/** The hover on "(sent in …)": what the reader typed, mentions made readable, at most 300 characters. */
+export function youWroteTip(original: string, channelId: string): string {
+    let readable = original;
+    try {
+        readable = renderDiscordMarkup(original, markupResolversFor(channelId));
+    } catch {
+        readable = original;
+    }
+    const chars = [...readable.trim()];
+    const short = chars.length > 300 ? `${chars.slice(0, 300).join("").trimEnd()}…` : chars.join("");
+    return SEND_IN_COPY.youWrote.replace("{text}", () => short);
+}
+
+/** "(sent in Turkish)" when Discord's tooltip cannot draw: the same words, the hover as a plain title. */
+function SentInTitleMark({ wrappedProps }: { wrappedProps?: { label?: string; tip?: string; }; }) {
+    return <span style={SWAP_MARK_STYLE} dir="ltr" title={wrappedProps?.tip} data-subline-sent-in="">{wrappedProps?.label ?? ""}</span>;
+}
+
+/** "(sent in Turkish)", its hover "You wrote: …" in Discord's own tooltip. */
+function SentInMark({ lang, wrote, channelId }: { lang: string | null; wrote: string; channelId: string; }) {
+    const label = lang === null ? SEND_IN_COPY.sentTranslated : SEND_IN_COPY.sentIn.replace("{lang}", () => lang);
+    const tip = youWroteTip(wrote, channelId);
+    return (
+        <ErrorBoundary fallback={SentInTitleMark as any} wrappedProps={{ label, tip }} message="Subline: the Send in marker's tooltip did not render.">
+            <Tooltip text={tip}>
+                {(p: any) => (
+                    <span {...p} style={SWAP_MARK_STYLE} dir="ltr" data-subline-sent-in="">{label}</span>
+                )}
+            </Tooltip>
+        </ErrorBoundary>
+    );
+}
+
+/** The plain text, when Discord's parts for a parsed text throw while they draw. */
+function PlainSwapText({ wrappedProps }: { wrappedProps?: { text?: string; }; }) {
+    return (wrappedProps?.text ?? null) as any;
+}
+
+/**
+ * The swapped text with its marker, and the rules that hide Discord's text of
+ * this one message while this is on screen (inPlace.ts swapCss).
+ */
+function SwapText({ view }: { view: Extract<SwapView, { kind: "translated" | "sentIn"; }>; }) {
+    const ref = React.useRef<HTMLDivElement | null>(null);
+    const [, redraw] = React.useReducer((n: number) => n + 1, 0);
+    React.useLayoutEffect(() => {
+        if (markupClass === null && findMarkupClass(ref.current, view.id)) redraw();
+    }, [view.id]);
+    const css = swapCss(view.id);
+    if (css === null) return null;
+    const attrs = { [SWAP_ATTR]: view.id };
+    return (
+        <div
+            ref={ref}
+            {...attrs}
+            className={markupClass ?? undefined}
+            dir={view.kind === "translated" ? view.dir : "auto"}
+            style={SWAP_TEXT_STYLE}
+            data-subline-in-place={view.kind}
+        >
+            <style>{css + SWAP_STATIC_CSS}</style>
+            <ErrorBoundary fallback={PlainSwapText as any} wrappedProps={{ text: view.plain }} message="Subline: a message text did not render; the plain text is shown.">
+                {view.parsed as any}
+            </ErrorBoundary>
+            {view.edited !== null && view.edited !== undefined ? <EditedMark at={view.edited} /> : null}
+            {view.kind === "translated"
+                ? <SwapMark view={view} />
+                : <SentInMark lang={view.lang} wrote={view.wrote} channelId={view.channelId} />}
+        </div>
+    );
+}
+
+/** After "Show original": Discord's original shows; this sits right under it. */
+function OriginalMark({ view }: { view: Extract<SwapView, { kind: "original"; }>; }) {
+    return (
+        <div data-subline-in-place="original" style={{ lineHeight: "1rem" }}>
+            <style>{SWAP_STATIC_CSS}</style>
+            <span style={{ ...SWAP_MARK_STYLE, marginInlineStart: 0 }} dir="ltr" data-subline-swap-mark="">
+                <SwapToggle id={view.id} label={MESSAGE_SWAP_COPY.showTranslation} />
+            </span>
+        </div>
+    );
+}
+
+/**
+ * Without :has() nothing is swapped. The reader's own message Send in sent
+ * then gets "(sent in …)" under it, small (the only place left for it).
+ */
+function sentInLineFallback(message: Message) {
+    if (!inPlaceOn || canSwap() || isFeatureOff("messages")) return null;
+    if (!isCurrentUser(message?.author?.id)) return null;
+    const wrote = youWroteEntry(message?.id);
+    if (wrote === undefined) return null;
+    const state = (message as { state?: unknown; }).state;
+    if (state !== undefined && state !== null && state !== "SENT") return null;
+    return (
+        <div data-subline-in-place="sentInLine" style={{ lineHeight: "1rem" }}>
+            <SentInMark lang={englishLangName(wrote.lang)} wrote={wrote.original} channelId={message.channel_id} />
+        </div>
+    );
+}
+
+function InPlaceAccessoryImpl({ message }: { message: Message; }) {
+    const [, redraw] = React.useReducer((n: number) => n + 1, 0);
+    const id = typeof message?.id === "string" ? message.id : "";
+    React.useEffect(() => {
+        const offs = [
+            subscribe(redraw), subscribeForcedInFlight(redraw), subscribeChannels(redraw), subscribeEntitlement(redraw),
+            subscribeSwap(redraw), subscribeYouWrote(redraw), subscribeMessageEdit(id, redraw)
+        ];
+        return () => {
+            for (const off of offs) {
+                try { off(); } catch { /* already gone */ }
+            }
+        };
+    }, [id]);
+    const live = liveMessage(message);
+    const view = inPlaceView(live);
+    if (view === null) return sentInLineFallback(live);
+    if (view.kind === "original") return <OriginalMark view={view} />;
+    // The beacon's proof: a translation reached the screen (as the line does).
+    if (view.kind === "translated") recordRendered();
+    return <SwapText view={view} />;
+}
+// A throw while working it out draws nothing: Discord's text stays (and no rule hides it).
+const InPlaceAccessory = safe("in-place text", InPlaceAccessoryImpl, m => logger.warn(m));
+
 /**
  * Registered separately from `messagePopoverButton` below, via the lower-level
  * `@api/MessagePopover` — the same real mechanism `messagePopoverButton`
@@ -5531,6 +6207,1049 @@ function forceQualityPopoverRender(message: Message) {
     };
 }
 
+/* -------------------------------------------------------------- send in -- */
+
+/*
+ * "SEND IN [LANGUAGE]" (0.2.11). The rules are sendIn.ts (SendInQueue); this
+ * is the wiring: Vencord's pre-send hook, one forced ✦ request per message
+ * through the same relay, credential, rate gate and holds as messages (so it
+ * counts against the same daily ceiling, and against the relay's own Send in
+ * limit: the request says `sendIn: true`), Discord's message box and send,
+ * the ✦ panel, the label next to ✦, the status line and "You wrote".
+ *
+ * HOW A MESSAGE IS SENT (checked in Vencord 1.15.16, src/plugins/_api/
+ * messageEvents.ts and src/api/MessageEvents.ts). Vencord's hook runs inside
+ * Discord's send, before Discord sends or clears anything, and Discord AWAITS
+ * it: `{ cancel: true }` answers Discord with shouldClear:false (nothing
+ * sent, the box as it was); anything else lets Discord send `messageObj` as
+ * it is then. So Discord cannot empty the box until the hook answers. For
+ * "the box empties at once":
+ *  - TEXT (with or without a reply): the hook answers cancel AT ONCE, Subline
+ *    empties the box itself (ComponentDispatch CLEAR_TEXT, the event
+ *    Discord's own box listens to) and removes the reply bar
+ *    (DELETE_PENDING_REPLY), then sends the translation itself with
+ *    Discord's MessageActions.sendMessage, to the channel the Enter came
+ *    from, with Discord's own send options from that Enter (the reply
+ *    reference and its mention setting). Order: one queue per channel.
+ *  - FILES (or stickers, a forward, a poll, @silent): only Discord's own send
+ *    path uploads them, so the hook WAITS while the text is translated and
+ *    writes the translation into `messageObj.content`; Discord then sends it
+ *    with the files. The box keeps the text until then (this one case waits;
+ *    the status line says "Sending in …"). On a failure the hook answers
+ *    cancel: text and files stay in the box.
+ * Vencord logs and IGNORES a hook that throws (the message would go out as
+ * typed), so sendInPreSend never throws.
+ *
+ * CLEAR_TEXT goes to the box Discord subscribed LAST. So, with two boxes
+ * (the channel and a thread in the side panel): the Enter's box must hold
+ * the focus (else nothing is cleared or sent), and a moment after the clear
+ * Subline reads that box's text back; if the message is still in it, the
+ * message is dropped from the queue (it is in the box, never sent twice).
+ *
+ * The label and the status line are drawn with the ✦ button. When the reader
+ * hides ✦ (Vencord's right-click hide), Send in acts as off, so nothing is
+ * translated, kept or refused where nobody can see it.
+ */
+
+/** When the box is read back after the clear, and read again before a message is dropped (checkCleared). */
+export const SEND_IN_BOX_CHECK_MS = 150;
+export const SEND_IN_BOX_RECHECK_MS = 300;
+
+/** How long one message waits for the relay; then nothing is sent and it is kept. */
+export const SEND_IN_TIMEOUT_MS = 8_000;
+/** The day (UTC) the relay said the Send in limit was reached, kept on this computer. */
+export const SEND_IN_LIMIT_KEY = "VcTranslate_sendInLimit";
+/** The relay's refusal when the day's Send in messages are used up (relay/src/access.ts). */
+export const SEND_IN_LIMIT_ERROR = "send_in_limit";
+
+let sendInLimitDay = "";
+
+function utcDay(now: number = Date.now()): string {
+    return new Date(now).toISOString().slice(0, 10);
+}
+
+/** Whether the relay said today's Send in messages are used up. */
+function sendInLimited(): boolean {
+    return sendInLimitDay !== "" && sendInLimitDay === utcDay();
+}
+
+async function loadSendInLimit(): Promise<void> {
+    try {
+        const day = await DataStore.get<unknown>(SEND_IN_LIMIT_KEY);
+        if (typeof day === "string" && day > sendInLimitDay) sendInLimitDay = day;
+    } catch { /* unknown: the relay says it again on the next message */ }
+}
+
+/** Send in works while ✦ is on for an account that needs no link first. */
+function sendInAllowed(): boolean {
+    return aiOn() && !linkNeeded() && !mustLink();
+}
+
+function parentChannelOf(channelId: string): string | null {
+    try {
+        const parent = (ChannelStore.getChannel(channelId) as { parent_id?: unknown; } | undefined)?.parent_id;
+        return typeof parent === "string" ? parent : null;
+    } catch {
+        return null;
+    }
+}
+
+/** "Burmese": a language's English name, for the label and the status line. */
+function sendInLangName(code: string): string {
+    return languageNames(code).english;
+}
+
+/** The find of MessageEventsAPI's pre-send patch (Vencord's src/plugins/_api/messageEvents.ts). */
+export const SEND_HOOK_FIND = ".handleSendMessage,onResize:";
+/** How often an unknown answer (no module source to read yet) is asked again. */
+export const SEND_HOOK_RECHECK_MS = 30_000;
+/** A pre-send in the channel this recently: an own message there went through the hook. */
+export const SEND_HOOK_CANARY_MS = 30_000;
+/** A message Subline itself sent this recently in a channel is not a canary hit. */
+export const SEND_HOOK_OWN_SEND_MS = 5_000;
+
+/** What patchInDiscord said (true/false are final for this Discord; null asks again). */
+let sendHookVerdict: boolean | null = null;
+let sendHookCheckedAt = 0;
+/** The canary saw a message leave without the hook this session (see sendInCanary). */
+let sendHookBroken = false;
+/** When the hook last ran per channel, and when Subline last sent there itself. */
+const lastPreSendAt = new Map<string, number>();
+const lastOwnSendAt = new Map<string, number>();
+/** Texts that went through the hook or Subline's own send lately (a Discord retry of one is not a canary hit). */
+const knownSentTexts = new Set<string>();
+const KNOWN_SENT_MAX = 100;
+function noteKnownSent(text: string): void {
+    const key = normalizeForCompare(text);
+    knownSentTexts.delete(key);
+    knownSentTexts.add(key);
+    while (knownSentTexts.size > KNOWN_SENT_MAX) knownSentTexts.delete(knownSentTexts.values().next().value as string);
+}
+
+/**
+ * Whether Vencord's pre-send hook is NOT in Discord. Then Send in is never
+ * turned on, and a Send in already on shows grey: with no hook, Enter would
+ * send the reader's own text under the label.
+ *   1. The patch still pending (its find hit no module): missing.
+ *   2. Its find hit a module whose code no longer fits the patch's match
+ *      (a Discord update that kept the find but moved the code): missing.
+ *      Vencord drops such a patch from the pending list anyway, so (1) alone
+ *      misses it; patchHealth.ts patchInDiscord reads it (once, cached).
+ *   3. The canary saw an own message leave without the hook: missing.
+ * Unknown (no Vencord internals to read): not blocked.
+ */
+function sendInHookMissing(): boolean {
+    if (sendHookBroken) return true;
+    if (sendHookVerdict !== null) return !sendHookVerdict;
+    const now = Date.now();
+    try {
+        const V = (globalThis as any).Vencord;
+        // The pending list is cheap to read: asked every time until a verdict.
+        const patches: unknown = V?.Plugins?.plugins?.MessageEventsAPI?.patches;
+        const pending: unknown = V?.WebpackPatcher?.patches;
+        if (Array.isArray(patches) && Array.isArray(pending)) {
+            const send = patches.find((p: any) => String(p?.find ?? "").includes("handleSendMessage"));
+            if (send !== undefined && pending.includes(send)) return true;
+        }
+        if (sendHookCheckedAt !== 0 && now - sendHookCheckedAt < SEND_HOOK_RECHECK_MS) return false;
+        sendHookCheckedAt = now;
+        const verdict = patchInDiscord(V, "MessageEventsAPI", SEND_HOOK_FIND);
+        // Not pending (read just above), so a false here is a misfit: final
+        // for this Discord, like a true.
+        if (verdict !== null) sendHookVerdict = verdict;
+        if (verdict === false) logger.error("Send in: Vencord's pre-send hook does not fit Discord's code (a Discord update); Send in is unavailable.");
+        return verdict === false;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * The runtime canary: the reader's own message, sent from this Discord
+ * (Discord's local copy, `optimistic`), in a channel where Send in is on and
+ * translating, with no pre-send there in the last SEND_HOOK_CANARY_MS and not
+ * sent by Subline itself, left without the hook. Then Send in stops for this
+ * session: the label greys ("unavailable") and the reader is told once.
+ * Forwards, stickers alone, empty and system messages are not counted (they
+ * never go through the message box). Never throws.
+ */
+function sendInCanary(message: Message | undefined, optimistic: boolean): void {
+    try {
+        if (!optimistic || sendHookBroken || !message) return;
+        const channelId = (message as { channel_id?: unknown; }).channel_id;
+        if (typeof channelId !== "string") return;
+        if (!sendInOn(channelId) || sendInLang(channelId) === null || sparkHidden() || sendInLabelReason() !== "") return;
+        const me = UserStore.getCurrentUser()?.id;
+        if (!me || (message as { author?: { id?: unknown; }; }).author?.id !== me) return;
+        if (typeof message.content !== "string" || message.content.trim() === "") return;
+        const type = (message as { type?: unknown; }).type;
+        if (type !== undefined && type !== 0 && type !== 19) return;
+        const snaps = (message as { message_snapshots?: unknown; }).message_snapshots;
+        if (Array.isArray(snaps) && snaps.length > 0) return;
+        const now = Date.now();
+        if (now - (lastPreSendAt.get(channelId) ?? -Infinity) < SEND_HOOK_CANARY_MS) return;
+        if (now - (lastOwnSendAt.get(channelId) ?? -Infinity) < SEND_HOOK_OWN_SEND_MS) return;
+        if (knownSentTexts.has(normalizeForCompare(message.content))) return;
+        sendHookBroken = true;
+        logger.error("Send in: a message left this Discord without Vencord's pre-send hook; Send in is stopped for this session.");
+        toast(SEND_IN_COPY.unavailable, "failure");
+        // The status line says it too, and every label redraws grey.
+        sendInQueue.note(channelId, SEND_IN_COPY.unavailable);
+    } catch { /* the canary only */ }
+}
+
+/**
+ * One outgoing text through the relay: one message, no context, no batching
+ * delay, forced (never skipped), into `lang`, marked `sendIn` so the relay
+ * counts it against the day's Send in limit. The same holds and refusals as
+ * messages; never throws.
+ */
+async function translateOutgoing(masked: string, lang: string, signal: { cancelled: boolean; }): Promise<OutgoingResult> {
+    const failed: OutgoingResult = { kind: "fail", note: SEND_IN_COPY.failed };
+    if (!aiOn()) return failed;
+    if (Date.now() < pausedUntil) return { kind: "blocked" };
+    if (Date.now() < relayWaitUntil()) return failed;
+    // Never queued behind incoming batches: the 8 s would run out while the
+    // relay is healthy (rateGate.ts takePrioritySlot).
+    takePrioritySlot();
+    // Given up meanwhile (the message's wait ran out): nothing is spent.
+    if (signal.cancelled) return { kind: "fail", note: SEND_IN_COPY.timeout };
+    const req: BatchRequest & { sendIn: true; } = { messages: [{ id: "send", author: "", text: masked }], context: [], targetLang: lang, force: true, sendIn: true };
+    let res: Awaited<ReturnType<typeof transport.translateBatch>> | null;
+    try {
+        const { credential, install } = await relayCredentials();
+        res = await transport.translateBatch(ENGINE, credential, JSON.stringify(req), "", settings.store.debugLogging, install);
+    } catch {
+        res = null;
+    }
+    if (res === null) {
+        recordError("ipc-failed");
+        return failed;
+    }
+    if (!res.ok) {
+        // The day's Send in messages are used up: only Send in stops. Never
+        // a cooldown, which would hold the translation of every message.
+        if (res.errorCode === SEND_IN_LIMIT_ERROR) {
+            logger.info("Send in: the relay says today's Send in limit is reached.");
+            return { kind: "limit" };
+        }
+        recordError(beaconErrorCode(res), beaconErrorStatus(res));
+        if (res.errorCode === "ai_paused") {
+            pausedUntil = Date.now() + (typeof res.retryAfterMs === "number" && res.retryAfterMs > 0 ? res.retryAfterMs : DEFAULT_COOLDOWN_MS);
+            showPausedNotice();
+            // blocked() now says "paused": the label greys, the reader is told once.
+            return { kind: "blocked" };
+        }
+        if (isEntitlementRefusal(res.errorCode)) {
+            planHeldUntil = Date.now() + PLAN_REFUSAL_HOLD_MS;
+            refreshAfterRefusal();
+        } else if (res.retryAfterMs) {
+            enterCooldown(ENGINE, res.retryAfterMs, res.quotaLimitPerMinute, res.error);
+        } else if (/\bHTTP 401\b/.test(res.error)) {
+            refreshAfterRefusal();
+        }
+        logger.warn(`Send in: the relay refused (${res.errorCode ?? res.error}); the message was kept, not sent.`);
+        return failed;
+    }
+    relayFailing = false;
+    const row = res.results.find(r => r.id === "send");
+    if (row === undefined || "failed" in row) return failed;
+    if (row.skip) return { kind: "same" };
+    if (row.truncated === true || typeof row.text !== "string") return failed;
+    return { kind: "ok", text: row.text, lang: row.lang };
+}
+
+/** What the hook saw at the Enter, carried to Subline's own send. */
+interface SendCarry {
+    message: { tts: boolean; invalidEmojis: unknown[]; validNonShortcutEmojis: unknown[]; };
+    /** Discord's own send options for this message (the reply reference, allowed mentions). */
+    options: Record<string, unknown>;
+}
+
+/** Discord's message box events (the ones its emoji picker and Vencord's insertTextIntoChatInputBox use). */
+function boxDispatch(event: string, payload?: unknown): boolean {
+    const dispatch = ComponentDispatch as { dispatchToLastSubscribed?(event: string, payload?: unknown): void; } | undefined;
+    if (typeof dispatch?.dispatchToLastSubscribed !== "function") return false;
+    dispatch.dispatchToLastSubscribed(event, payload);
+    return true;
+}
+
+/** Back to the message box (after a choice in the panel or an action on the status line). */
+function focusBox(): void {
+    try { boxDispatch("TEXTAREA_FOCUS"); } catch { /* the reader clicks the box */ }
+}
+
+/**
+ * The ✦ buttons drawn now (one per message box: the channel's, and a
+ * thread's in the side panel), by owner: which channel each box is for, and
+ * its ✦ in the page. Lets Send in find the box of a channel.
+ */
+const sparkBoxes = new Map<object, { channelId: string; glyph: Anchor; }>();
+
+/** The message box (Discord's channel text area) an element is in. */
+function boxAreaOf(el: Element | null | undefined): Element | null {
+    try {
+        return (el?.closest?.('[class*="channelTextArea"]') ?? el?.closest?.("form") ?? null) as Element | null;
+    } catch {
+        return null;
+    }
+}
+
+function boxAreasFor(channelId: string): Element[] {
+    const out: Element[] = [];
+    for (const b of sparkBoxes.values()) {
+        if (b.channelId !== channelId) continue;
+        const area = boxAreaOf(b.glyph.current);
+        if (area && !out.includes(area)) out.push(area);
+    }
+    return out;
+}
+
+/** The editable text of a message box, or null when there is none to read. */
+function boxTextbox(area: Element): HTMLElement | null {
+    try {
+        return area.querySelector?.('[role="textbox"]') as HTMLElement | null;
+    } catch {
+        return null;
+    }
+}
+
+/** A box's drawn text ("" while Slate draws its placeholder: the box is empty), or null. */
+function boxDrawnText(area: Element): string | null {
+    const tb = boxTextbox(area);
+    if (!tb) return null;
+    try {
+        if (tb.querySelector?.("[data-slate-placeholder]")) return "";
+    } catch { /* read the text */ }
+    return typeof tb.textContent === "string" ? tb.textContent : null;
+}
+
+/**
+ * Whether the box of `channelId` still shows `original` (Discord's clear went
+ * elsewhere). The box draws `<@123>` as `@deniz`, emoji as pictures and each
+ * line as its own block, so the drawn text is compared by sendIn.ts boxHolds,
+ * with Discord's draft (the raw form) as the second witness.
+ */
+function boxStillHolds(channelId: string, original: string): boolean {
+    return boxHolds(original, boxAreasFor(channelId).map(boxDrawnText), draftOf(channelId));
+}
+
+/**
+ * Whether the focus is in a message box Subline knows to be ANOTHER
+ * channel's: then Discord's clear would not reach the Enter's box.
+ */
+function focusInOtherBox(channelId: string): boolean {
+    if (typeof document === "undefined") return false;
+    const area = boxAreaOf(document.activeElement);
+    if (!area) return false;
+    let other = false;
+    for (const b of sparkBoxes.values()) {
+        if (boxAreaOf(b.glyph.current) !== area) continue;
+        if (b.channelId === channelId) return false;
+        other = true;
+    }
+    return other;
+}
+
+/** The text Discord keeps for a channel's box (its draft), or null when unknown. */
+function draftOf(channelId: string): string | null {
+    try {
+        const d = (DraftStore as { getDraft?(channelId: string, type: number): unknown; } | undefined)?.getDraft?.(channelId, 0);
+        return typeof d === "string" ? d : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Whether the reader hid ✦ (Vencord's right-click hide of a chat bar button): then Send in acts as off. */
+export function sparkHidden(): boolean {
+    try {
+        return (globalThis as any).Vencord?.Settings?.uiElements?.chatBarButtons?.VcTranslate?.enabled === false;
+    } catch {
+        return false;
+    }
+}
+
+/** Discord's limit for the reader's own messages: 4000 with Nitro, else 2000. */
+function maxMessageChars(): number {
+    try {
+        return (UserStore.getCurrentUser() as { premiumType?: unknown; } | undefined)?.premiumType === 2 ? 4000 : 2000;
+    } catch {
+        return 2000;
+    }
+}
+
+export const sendInQueue = new SendInQueue({
+    state(channelId) {
+        const lang = sendInLang(channelId);
+        // ✦ hidden: no label and no status line can show, so Send in is off.
+        if (sparkHidden()) return { kind: "off" };
+        return sendInOn(channelId) && lang !== null ? { kind: "on", lang } : { kind: "off" };
+    },
+    blocked() {
+        if (!sendInAllowed()) return { key: "noAi", note: SEND_IN_COPY.noAi };
+        // Each pause is told once (the label then says it, grey).
+        if (Date.now() < pausedUntil) return { key: `paused:${pausedUntil}`, note: SEND_IN_COPY.paused };
+        if (sendInLimited()) return { key: `limit:${utcDay()}`, note: SEND_IN_COPY.limit };
+        return null;
+    },
+    translate: translateOutgoing,
+    noteLimit() {
+        sendInLimitDay = utcDay();
+        void DataStore.set(SEND_IN_LIMIT_KEY, sendInLimitDay).catch(() => { /* kept in memory */ });
+    },
+    clearBox(channelId, carry) {
+        if (focusInOtherBox(channelId)) {
+            logger.warn("Send in: the focus is in another channel's message box; the text is left in its box, not sent.");
+            return false;
+        }
+        if (!boxDispatch("CLEAR_TEXT")) {
+            logger.error("Send in: Discord's message box events are missing; the text is left in the box, not sent.");
+            return false;
+        }
+        // The reply goes with the message (its options); the bar above the box goes now.
+        if ((carry as SendCarry).options?.messageReference) {
+            try {
+                (FluxDispatcher as unknown as { dispatch(e: unknown): void; }).dispatch({ type: "DELETE_PENDING_REPLY", channelId });
+            } catch (err) {
+                logger.warn("Send in: the reply bar could not be closed (the reply is still sent with the message).", err);
+            }
+        }
+        return true;
+    },
+    send(channelId, content, carry) {
+        const c = carry as SendCarry;
+        const actions = MessageActions as { sendMessage?(channelId: string, message: unknown, wait: boolean, options: unknown): unknown; } | undefined;
+        if (typeof actions?.sendMessage !== "function") throw new Error("Discord's sendMessage is missing");
+        lastOwnSendAt.set(channelId, Date.now());
+        noteKnownSent(content);
+        const sent = actions.sendMessage(channelId, { ...c.message, content }, true, c.options);
+        // A send Discord took and then failed (offline, slow mode) is shown by
+        // Discord itself in the chat, with its own retry: nothing is lost.
+        if (sent && typeof (sent as Promise<unknown>).catch === "function") {
+            (sent as Promise<unknown>).catch(err => logger.warn("Send in: Discord's send failed after it took the message.", err));
+        }
+    },
+    checkCleared(channelId, original) {
+        // Read once Discord has drawn the cleared box. React may draw it a
+        // little later than the clear, so "still there" is believed only when
+        // a second read, later, says it again (a wrong "still there" would
+        // drop a message that left the box). The send waits for this, the
+        // translation does not.
+        if (typeof document === "undefined" || typeof setTimeout !== "function") return Promise.resolve(true);
+        return new Promise<boolean>(resolve => setTimeout(() => {
+            if (!boxStillHolds(channelId, original)) { resolve(true); return; }
+            setTimeout(() => {
+                const held = boxStillHolds(channelId, original);
+                if (held) logger.warn("Send in: Discord's clear reached another box; the message is still in its box and was not sent.");
+                resolve(!held);
+            }, SEND_IN_BOX_RECHECK_MS);
+        }, SEND_IN_BOX_CHECK_MS));
+    },
+    sent: (channelId, content, original, lang) => expectSent(channelId, content, original, Date.now(), lang),
+    unsent: (channelId, content) => forgetExpected(channelId, content),
+    releasing(channelId, original) {
+        // A message with files: Discord empties the box after its own send,
+        // so what the reader typed meanwhile is put back once it has.
+        const extra = typedMeanwhile(draftOf(channelId) ?? "", original);
+        if (extra === "") return;
+        setTimeout(() => {
+            if (draftOf(channelId) === "" && SelectedChannelStore.getChannelId() === channelId) {
+                boxDispatch("INSERT_TEXT", { rawText: extra, plainText: extra });
+            } else {
+                logger.warn("Send in: text typed while a message with files was sent could not be put back (the box was not empty or the channel changed).");
+            }
+        }, 300);
+    },
+    maxSendChars: maxMessageChars,
+    maxChars: LLM_TEXT_MAX,
+    timeoutMs: SEND_IN_TIMEOUT_MS,
+    setTimer: (fn, ms) => setTimeout(fn, ms),
+    clearTimer: handle => clearTimeout(handle as ReturnType<typeof setTimeout>)
+}, SEND_IN_COPY);
+
+/**
+ * Whether only Discord's own send can carry this message (see HOW A MESSAGE
+ * IS SENT): files, stickers, a forward, a poll, a scheduled message, or
+ * @silent (Discord reads it from the text in its own send path).
+ */
+function needsDiscordSend(content: string, options: Record<string, unknown> | undefined, props: Record<string, unknown> | undefined): boolean {
+    if (props?.hasAttachments === true || props?.hasStickers === true) return true;
+    if (Array.isArray(options?.stickerIds) && options!.stickerIds.length > 0) return true;
+    if (options?.alsoForwardToChannelId || options?.poll || options?.scheduledTimestamp) return true;
+    return /^\s*@silent\s/.test(content);
+}
+
+/** How many Enters reached the hook, per channel ("Try again" on a message with files checks its Enter arrived). */
+const preSends = new Map<string, number>();
+
+/**
+ * Vencord's pre-send hook (a new message; an edit never comes here). Never
+ * throws: Vencord would ignore the throw and Discord would send the reader's
+ * own text while Send in is on. A failure here keeps the text in the box.
+ */
+async function sendInPreSend(
+    channelId: string, messageObj: { content?: unknown; tts?: unknown; invalidEmojis?: unknown; validNonShortcutEmojis?: unknown; } | undefined,
+    options?: Record<string, unknown>, props?: Record<string, unknown>
+): Promise<{ cancel: true; } | undefined> {
+    preSends.set(channelId, (preSends.get(channelId) ?? 0) + 1);
+    lastPreSendAt.set(channelId, Date.now());
+    try {
+        const content = typeof messageObj?.content === "string" ? messageObj.content : "";
+        const carry: SendCarry = {
+            message: {
+                tts: messageObj?.tts === true,
+                invalidEmojis: Array.isArray(messageObj?.invalidEmojis) ? messageObj!.invalidEmojis : [],
+                validNonShortcutEmojis: Array.isArray(messageObj?.validNonShortcutEmojis) ? messageObj!.validNonShortcutEmojis : []
+            },
+            options: options && typeof options === "object" ? { ...options } : {}
+        };
+        const decision = await sendInQueue.onPreSend(channelId, content, carry, needsDiscordSend(content, options, props));
+        if (decision.action === "cancel") return { cancel: true };
+        if (decision.content !== undefined && messageObj) messageObj.content = decision.content;
+        noteKnownSent(decision.content ?? content);
+        return undefined;
+    } catch (err) {
+        logger.error("Send in: the pre-send check threw; the text is kept in the box.", err);
+        if (!sendInOn(channelId)) return undefined;
+        toast(SEND_IN_COPY.failed, "failure");
+        return { cancel: true };
+    }
+}
+
+/**
+ * The plugin stopped with messages out of their box and not sent: the open
+ * channel's are put back in its box; the others are counted in a toast and
+ * the log. Never throws.
+ */
+function giveBackUnsent(lost: { channelId: string; original: string; }[]): void {
+    try {
+        if (lost.length === 0) return;
+        const open = SelectedChannelStore.getChannelId();
+        const here = lost.filter(l => l.channelId === open).map(l => l.original);
+        const elsewhere = lost.length - here.length;
+        if (here.length > 0) {
+            const text = here.join("\n");
+            boxDispatch("INSERT_TEXT", { rawText: text, plainText: text });
+            toast(SEND_IN_COPY.lostOnStop.replace("{n}", String(here.length)), "info");
+        }
+        if (elsewhere > 0) toast(SEND_IN_COPY.lostOnStopElsewhere.replace("{n}", String(elsewhere)), "failure");
+        logger.warn(`Send in: stopped with ${lost.length} message(s) not sent (${here.length} put back in the open box).`);
+    } catch (err) {
+        logger.error("Send in: unsent messages could not be given back.", err);
+    }
+}
+
+/** Turn Send in on in this channel, in `code`. */
+function chooseSendIn(channelId: string, code: string): boolean {
+    if (sendInHookMissing()) {
+        logger.warn("Send in: Vencord's pre-send hook is not in Discord (its patch is still pending); not turned on.");
+        toast(SEND_IN_COPY.unavailable, "failure");
+        return false;
+    }
+    return chooseSendInLang(channelId, code);
+}
+
+/* ---- the ✦ panel ---- */
+
+/** Which ✦ button's panel is open (one at a time), and for which channel. */
+let sendInPanel: { owner: object; channelId: string; } | null = null;
+const panelListeners = new Set<() => void>();
+
+function setSendInPanel(next: { owner: object; channelId: string; } | null): void {
+    sendInPanel = next;
+    for (const fn of panelListeners) {
+        try { fn(); } catch { /* a listener's own trouble */ }
+    }
+}
+
+/** The channel whose ✦ panel is open, or null. */
+export function sendInPanelChannel(): string | null {
+    return sendInPanel?.channelId ?? null;
+}
+
+function subscribePanel(fn: () => void): () => void {
+    panelListeners.add(fn);
+    return () => panelListeners.delete(fn);
+}
+
+/**
+ * The panel's style and the label's, drawn with them, so nothing outlives the
+ * plugin. The panel is drawn like Discord's own menus (checked against
+ * Discord's stylesheet, 2026-11-05): the menu surface, its border and
+ * shadow, 8px padding, 32px items with 4px corners, the hover colour, 12px
+ * section labels, a thin scrollbar. Discord's current tokens first, each
+ * with an older token and a literal behind it, so a renamed token never
+ * leaves the panel unreadable.
+ */
+export const SEND_IN_CSS = `
+.subline-sendin-float { position: fixed; z-index: 1002; visibility: hidden; }
+.subline-sendin-panel {
+  width: 240px; padding: 8px; box-sizing: border-box; border-radius: 8px;
+  background: var(--background-surface-high, var(--background-floating, #2b2d31));
+  background-color: var(--background-surface-higher, var(--background-floating, #2b2d31));
+  border: 1px solid var(--border-subtle, transparent);
+  box-shadow: var(--shadow-high, var(--elevation-high, 0 8px 16px rgba(0,0,0,0.24)));
+  color: var(--text-default, var(--text-normal, #dbdee1));
+  font-family: var(--font-primary, inherit); font-size: 14px; line-height: 18px; font-weight: 500;
+}
+.subline-sendin-search {
+  display: block; width: 100%; height: 32px; box-sizing: border-box; margin: 0 0 4px; padding: 0 8px;
+  border-radius: 8px; border: 1px solid var(--input-border-default, var(--border-subtle, transparent)); outline: none;
+  background: var(--input-background-default, var(--background-base-lowest, var(--background-tertiary, #1e1f22)));
+  color: var(--text-default, var(--text-normal, #dbdee1)); font: inherit; font-weight: 400;
+}
+.subline-sendin-search:focus { border-color: var(--input-border-active, var(--border-focus, var(--brand-500, #5865f2))); }
+.subline-sendin-search::placeholder { color: var(--input-placeholder-text-default, var(--text-muted, #949ba4)); }
+.subline-sendin-list {
+  max-height: 300px; overflow-y: auto; overscroll-behavior: contain;
+  scrollbar-width: thin; scrollbar-color: var(--scrollbar-thin-thumb, rgba(0,0,0,0.4)) transparent;
+}
+.subline-sendin-section { padding: 8px 8px 4px; font-size: 12px; line-height: 16px; font-weight: 600; color: var(--text-muted, #949ba4); user-select: none; }
+.subline-sendin-item {
+  display: flex; align-items: center; gap: 8px; min-height: 32px; margin: 2px 0; padding: 6px 8px; box-sizing: border-box;
+  border-radius: 4px; cursor: pointer; user-select: none; color: var(--interactive-text-default, var(--interactive-normal, #b5bac1));
+}
+.subline-sendin-item[data-hi="true"] { background-color: var(--interactive-background-hover, var(--background-modifier-hover, rgba(78,80,88,0.3))); }
+.subline-sendin-name-en { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-strong, var(--text-default, #f2f3f5)); }
+.subline-sendin-name-native { flex: 0 1 auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; color: var(--text-muted, #949ba4); }
+.subline-sendin-check { flex: 0 0 auto; width: 18px; height: 18px; color: var(--text-brand, var(--brand-500, #5865f2)); }
+.subline-sendin-sep { height: 0; margin: 4px 8px; border-bottom: 1px solid var(--border-subtle, rgba(78,80,88,0.48)); }
+.subline-sendin-off .subline-sendin-name-en { color: var(--text-feedback-critical, var(--text-danger, #f23f43)); }
+.subline-sendin-off[data-hi="true"] { background-color: var(--background-feedback-critical, rgba(218,55,60,0.1)); }
+.subline-sendin-empty { padding: 8px; font-weight: 400; color: var(--text-muted, #949ba4); }
+.subline-sendin-name, .subline-sendin-x, .subline-sendin-action { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+.subline-sendin-label { display: inline-flex; align-items: center; gap: 2px; margin-right: 2px; font-size: 13px; white-space: nowrap; color: var(--text-default, var(--text-normal, #dbdee1)); }
+.subline-sendin-label[data-grey="true"] { color: var(--text-muted, #949ba4); opacity: 0.8; }
+.subline-sendin-name { padding: 2px 4px; border-radius: 4px; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.subline-sendin-name:hover, .subline-sendin-x:hover { background: var(--interactive-background-hover, var(--background-modifier-hover, rgba(78,80,88,0.3))); }
+.subline-sendin-x { padding: 2px 4px; border-radius: 4px; color: var(--interactive-text-default, var(--interactive-normal, #b5bac1)); }
+.subline-sendin-status {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 3px 8px; border-radius: 6px; font-size: 13px;
+  background-color: var(--background-surface-higher, var(--background-floating, #2b2d31)); color: var(--text-default, var(--text-normal, #dbdee1));
+  border: 1px solid var(--border-subtle, transparent); box-shadow: var(--shadow-low, var(--elevation-low, 0 1px 3px rgba(0,0,0,0.2)));
+}
+.subline-sendin-status[data-kind="failed"], .subline-sendin-status[data-kind="boxFailed"] { color: var(--text-feedback-critical, var(--text-danger, #f23f43)); }
+.subline-sendin-action { padding: 1px 6px; border-radius: 4px; color: var(--text-link, #00a8fc); }
+.subline-sendin-action:hover { text-decoration: underline; }
+`;
+
+type Anchor = { current: HTMLElement | null; };
+
+/**
+ * The ✦ button around the glyph. Vencord's ChatBarButton draws Discord's
+ * Clickable, a `div role="button"`, not a <button>.
+ */
+export function sparkButtonOf(glyph: Element | null | undefined): Element | null {
+    try {
+        return (glyph?.closest?.('[role="button"], button') ?? null) as Element | null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Whether a mousedown on `target` closes the panel: anywhere but the panel,
+ * the ✦ button (its click toggles) and the label (its click opens).
+ */
+export function panelMousedownCloses(target: Node | null, panel: Node | null, sparkButton: Node | null): boolean {
+    if (!target) return false;
+    if (panel?.contains?.(target)) return false;
+    if (sparkButton?.contains?.(target)) return false;
+    if ((target as Element).closest?.("[data-subline-sendin-label]")) return false;
+    return true;
+}
+
+/** The next highlighted row for an arrow key, wrapping round; -1 with no rows. */
+export function panelStep(at: number, count: number, key: "ArrowDown" | "ArrowUp"): number {
+    if (count <= 0) return -1;
+    const from = at < 0 || at >= count ? (key === "ArrowDown" ? -1 : 0) : at;
+    return (from + (key === "ArrowDown" ? 1 : count - 1)) % count;
+}
+
+/** One row of the panel: a language, or Off (only while Send in is on here). */
+export type PanelItem = { kind: "lang"; code: string; } | { kind: "off"; };
+
+/**
+ * What the panel lists: its sections (one unlabelled "search" section while
+ * something is typed) and every row, in order. Off (while Send in is on
+ * here) only with nothing typed: Enter after a search that found nothing
+ * must never turn Send in off.
+ */
+export function panelView(channelId: string, query: string, reader: string, chosen: string | null): {
+    sections: { key: PanelSectionKey | "search"; codes: string[]; }[];
+    items: PanelItem[];
+} {
+    const sections: { key: PanelSectionKey | "search"; codes: string[]; }[] = query.trim() !== ""
+        ? [{ key: "search", codes: searchLanguages(query, languageNameRows(), reader).map(r => r.code) }]
+        : panelSections(channelId, reader, parentChannelOf(channelId), chosen);
+    const items: PanelItem[] = sections.flatMap(sec => sec.codes.map(code => ({ kind: "lang" as const, code })));
+    if (chosen !== null && query.trim() === "") items.push({ kind: "off" });
+    return { sections: sections.filter(sec => sec.codes.length > 0), items };
+}
+
+/** The panel's languages, in the order it lists them (the search's matches while something is typed). */
+export function panelCodes(channelId: string, query: string, reader: string): string[] {
+    const chosen = sendInOn(channelId) ? sendInLang(channelId) : null;
+    return panelView(channelId, query, reader, chosen).items.flatMap(i => i.kind === "lang" ? [i.code] : []);
+}
+
+/** A section's small label ("In this channel"); none for search results. */
+function sectionLabel(key: PanelSectionKey | "search"): string | null {
+    switch (key) {
+        case "channel": return SEND_IN_COPY.sectionChannel;
+        case "recent": return SEND_IN_COPY.sectionRecent;
+        case "common": return SEND_IN_COPY.sectionCommon;
+        default: return null;
+    }
+}
+
+/** The check on the language Send in is on in (Discord's menu check, drawn here). */
+function PanelCheck() {
+    return (
+        <svg className="subline-sendin-check" viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17Z" />
+        </svg>
+    );
+}
+
+/**
+ * A box drawn over Discord (in document.body), kept where it belongs while
+ * it is open: the panel above the chat bar, right-aligned to ✦ (like
+ * Discord's emoji picker), the status line just above the message box.
+ */
+function Floating({ anchor, kind, children }: { anchor: Anchor; kind: "panel" | "status"; children: any; }) {
+    const el = React.useRef<HTMLDivElement | null>(null);
+    React.useEffect(() => {
+        if (typeof window === "undefined" || typeof requestAnimationFrame !== "function") return;
+        let raf = 0;
+        const place = () => {
+            const a = anchor.current;
+            const me = el.current;
+            if (a && me) {
+                const r = a.getBoundingClientRect();
+                const areaEl = (a.closest?.('[class*="channelTextArea"]') ?? a.closest?.("form") ?? a) as HTMLElement;
+                const area = areaEl.getBoundingClientRect();
+                const bottom = `${Math.max(0, window.innerHeight - area.top + (kind === "panel" ? 8 : 4))}px`;
+                if (me.style.bottom !== bottom) me.style.bottom = bottom;
+                if (kind === "panel") {
+                    const right = `${Math.max(8, window.innerWidth - (sparkButtonOf(a) ?? a).getBoundingClientRect().right)}px`;
+                    if (me.style.right !== right) me.style.right = right;
+                } else {
+                    const left = `${Math.max(0, area.left + 8)}px`;
+                    if (me.style.left !== left) me.style.left = left;
+                    me.style.maxWidth = `${Math.max(120, area.width - 16)}px`;
+                }
+                const shown = r.width > 0 || r.height > 0 ? "visible" : "hidden";
+                if (me.style.visibility !== shown) me.style.visibility = shown;
+            }
+            raf = requestAnimationFrame(place);
+        };
+        place();
+        return () => cancelAnimationFrame(raf);
+    }, [kind]);
+    if (typeof document === "undefined" || !document.body) return null;
+    // Clicks inside never reach the ✦ button (React bubbles through a portal).
+    const stop = (e: { stopPropagation(): void; }) => e.stopPropagation();
+    return ReactDOM.createPortal(
+        <div ref={el} className="subline-sendin-float" onClick={stop} onMouseDown={stop}>{children}</div>,
+        document.body
+    );
+}
+
+/**
+ * THE ✦ PANEL (0.2.11): Discord's menu look, languages listed at once in
+ * sections (In this channel, Recent, Common), the search on top filtering
+ * every language, a check on the current one, Off while it is on. Arrows
+ * and Enter work from the search box, Esc closes. A press on a row never
+ * takes the focus from the search box (mousedown is held), so the first
+ * click always lands on the row it was meant for.
+ */
+export function SendInPanel({ channelId, anchor, onClose }: { channelId: string; anchor: Anchor; onClose(): void; }) {
+    const [query, setQuery] = React.useState("");
+    const [hi, setHi] = React.useState(0);
+    const panelRef = React.useRef<HTMLDivElement | null>(null);
+    const listRef = React.useRef<HTMLDivElement | null>(null);
+    const reader = normalizeTargetLang(settings.store.targetLang) ?? settings.store.targetLang;
+    const chosen = sendInOn(channelId) ? sendInLang(channelId) : null;
+    const searching = query.trim() !== "";
+    const { sections, items } = panelView(channelId, query, reader, chosen);
+    const at = items.length === 0 ? -1 : Math.min(hi, items.length - 1);
+
+    const choose = (code: string) => {
+        if (chooseSendIn(channelId, code)) {
+            onClose();
+            focusBox();
+        }
+    };
+    const turnOff = () => {
+        turnSendInOff(channelId);
+        onClose();
+        focusBox();
+    };
+    const press = (item: PanelItem) => (item.kind === "off" ? turnOff() : choose(item.code));
+
+    // Click outside or Esc closes it. A click on ✦ (or the label) is left to
+    // its own handler, which toggles.
+    React.useEffect(() => {
+        if (typeof document === "undefined") return;
+        const down = (e: MouseEvent) => {
+            if (panelMousedownCloses(e.target as Node | null, panelRef.current, sparkButtonOf(anchor.current))) onClose();
+        };
+        const key = (e: KeyboardEvent) => {
+            if (e.key !== "Escape") return;
+            e.stopPropagation();
+            e.preventDefault();
+            onClose();
+            focusBox();
+        };
+        document.addEventListener("mousedown", down, true);
+        document.addEventListener("keydown", key, true);
+        return () => {
+            document.removeEventListener("mousedown", down, true);
+            document.removeEventListener("keydown", key, true);
+        };
+    }, []);
+
+    // The highlighted row stays in view while the arrows move it.
+    React.useEffect(() => {
+        try {
+            const row = listRef.current?.querySelector?.('[data-hi="true"]') as HTMLElement | null | undefined;
+            row?.scrollIntoView?.({ block: "nearest" });
+        } catch { /* only the scrolling */ }
+    }, [at, query]);
+
+    const onKey = (e: { key: string; preventDefault(): void; stopPropagation(): void; }) => {
+        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (items.length === 0) return;
+            setHi(panelStep(at, items.length, e.key));
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            e.stopPropagation();
+            if (at >= 0) press(items[at]!);
+        } else {
+            // Discord's own shortcuts never see what is typed here.
+            e.stopPropagation();
+        }
+    };
+    // Held, so the search box keeps the focus and nothing redraws between press and click.
+    const hold = (e: { preventDefault(): void; }) => e.preventDefault();
+
+    const row = (item: PanelItem, i: number) => {
+        if (item.kind === "off") {
+            return (
+                <div
+                    key="off"
+                    role="option"
+                    aria-selected={i === at}
+                    className="subline-sendin-item subline-sendin-off"
+                    data-hi={i === at ? "true" : "false"}
+                    onMouseDown={hold}
+                    onMouseEnter={() => setHi(i)}
+                    onClick={turnOff}
+                >
+                    <span className="subline-sendin-name-en">{SEND_IN_COPY.off}</span>
+                </div>
+            );
+        }
+        const names = languageNames(item.code);
+        return (
+            <div
+                key={item.code}
+                role="option"
+                aria-selected={i === at}
+                className="subline-sendin-item"
+                data-hi={i === at ? "true" : "false"}
+                data-on={item.code === chosen ? "true" : "false"}
+                data-code={item.code}
+                onMouseDown={hold}
+                onMouseEnter={() => setHi(i)}
+                onClick={() => choose(item.code)}
+            >
+                <span className="subline-sendin-name-en">{names.english}</span>
+                {names.native !== names.english ? <span className="subline-sendin-name-native">{names.native}</span> : null}
+                {item.code === chosen ? <PanelCheck /> : null}
+            </div>
+        );
+    };
+
+    let n = 0;
+    const offAt = items.length > 0 && items[items.length - 1]!.kind === "off" ? items.length - 1 : -1;
+    return (
+        <Floating anchor={anchor} kind="panel">
+            <div ref={panelRef} className="subline-sendin-panel" role="dialog" aria-label={SEND_IN_COPY.heading}>
+                <input
+                    className="subline-sendin-search"
+                    type="text"
+                    autoFocus
+                    placeholder={SEND_IN_COPY.search}
+                    aria-label={SEND_IN_COPY.search}
+                    value={query}
+                    onChange={(e: { target: { value: string; }; }) => { setQuery(e.target.value); setHi(0); }}
+                    onKeyDown={onKey}
+                />
+                <div ref={listRef} className="subline-sendin-list" role="listbox" aria-label={SEND_IN_COPY.heading}>
+                    {sections.map(sec => {
+                        const label = sectionLabel(sec.key);
+                        return (
+                            <div key={sec.key} role="group" aria-label={label ?? undefined}>
+                                {label !== null ? <div className="subline-sendin-section" aria-hidden="true">{label}</div> : null}
+                                {sec.codes.map(code => row({ kind: "lang", code }, n++))}
+                            </div>
+                        );
+                    })}
+                    {searching && sections.length === 0 ? <div className="subline-sendin-empty">{SEND_IN_COPY.noMatch}</div> : null}
+                </div>
+                {offAt >= 0 ? (
+                    <>
+                        <div className="subline-sendin-sep" role="separator" />
+                        {row({ kind: "off" }, offAt)}
+                    </>
+                ) : null}
+            </div>
+        </Floating>
+    );
+}
+
+/**
+ * Why the label is grey (Send in cannot translate now, so messages go as
+ * written), or "" while it translates.
+ */
+export function sendInLabelReason(): string {
+    if (!sendInAllowed()) return SEND_IN_COPY.labelNoAi;
+    if (sendInHookMissing()) return SEND_IN_COPY.labelUnavailable;
+    if (Date.now() < pausedUntil) return SEND_IN_COPY.labelPaused;
+    if (sendInLimited()) return SEND_IN_COPY.labelLimit;
+    return "";
+}
+
+/** While Send in is on in this channel: "→ Burmese ✕" next to ✦ (grey when it cannot translate). */
+export function SendInLabel({ channelId, onOpen }: { channelId: string; onOpen(): void; }) {
+    const lang = sendInLang(channelId);
+    if (!sendInOn(channelId) || lang === null) return null;
+    const name = sendInLangName(lang);
+    const reason = sendInLabelReason();
+    return (
+        <span className="subline-sendin-label" data-subline-sendin-label="" data-grey={reason ? "true" : "false"}>
+            <button
+                type="button"
+                className="subline-sendin-name"
+                title={reason ? `${SEND_IN_COPY.label.replace("{lang}", name)} · ${reason}` : SEND_IN_COPY.labelHover.replace("{lang}", name)}
+                onClick={(e: { stopPropagation(): void; }) => { e.stopPropagation(); onOpen(); }}
+            >
+                {SEND_IN_COPY.label.replace("{lang}", name)}{reason ? ` · ${reason}` : ""}
+            </button>
+            <button
+                type="button"
+                className="subline-sendin-x"
+                aria-label={SEND_IN_COPY.labelOff}
+                title={SEND_IN_COPY.labelOff}
+                onClick={(e: { stopPropagation(): void; }) => { e.stopPropagation(); turnSendInOff(channelId); }}
+            >
+                ✕
+            </button>
+        </span>
+    );
+}
+
+/** What the status line says for this view (its text, and its actions). */
+export function sendInStatusParts(view: StatusView): { text: string; actions: ("tryAgain" | "sendAsWritten")[]; } {
+    switch (view.kind) {
+        case "sending":
+            return { text: SEND_IN_COPY.sending.replace("{lang}", view.lang ? sendInLangName(view.lang) : ""), actions: [] };
+        case "failed":
+            return {
+                text: view.count > 1 ? `${view.note} ${SEND_IN_COPY.more.replace("{n}", String(view.count))}` : view.note,
+                actions: ["tryAgain", "sendAsWritten"]
+            };
+        case "boxFailed":
+            return { text: view.note, actions: ["tryAgain", "sendAsWritten"] };
+        case "note":
+            return { text: view.text, actions: [] };
+    }
+}
+
+/**
+ * "Try again" on a message with files (still in its box): Subline presses
+ * Enter in that box for the reader, so Discord's own send (with the files)
+ * runs again. If no Enter reaches the hook soon after, the line says to
+ * press Enter.
+ */
+function pressEnterIn(channelId: string): boolean {
+    try {
+        if (typeof KeyboardEvent !== "function") return false;
+        const tb = boxAreasFor(channelId).map(boxTextbox).find(t => t !== null);
+        if (!tb || typeof tb.dispatchEvent !== "function") return false;
+        tb.focus?.();
+        tb.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true } as KeyboardEventInit));
+        return true;
+    } catch (err) {
+        logger.warn("Send in: could not press Enter in the message box.", err);
+        return false;
+    }
+}
+
+/** How long "Try again" on a message with files waits for its Enter to reach the hook. */
+export const SEND_IN_ENTER_CHECK_MS = 500;
+
+/** A status line action, as the button does it. */
+export function sendInStatusAction(channelId: string, kind: StatusView["kind"], action: "tryAgain" | "sendAsWritten"): void {
+    if (action === "tryAgain" && kind === "boxFailed") {
+        sendInQueue.dismissBox(channelId);
+        const before = preSends.get(channelId) ?? 0;
+        if (!pressEnterIn(channelId)) {
+            sendInQueue.note(channelId, SEND_IN_COPY.pressEnter);
+            focusBox();
+            return;
+        }
+        setTimeout(() => {
+            if ((preSends.get(channelId) ?? 0) === before) {
+                sendInQueue.note(channelId, SEND_IN_COPY.pressEnter);
+                focusBox();
+            }
+        }, SEND_IN_ENTER_CHECK_MS);
+        return;
+    }
+    if (action === "tryAgain") sendInQueue.retry(channelId);
+    else if (kind === "boxFailed") {
+        if (sendInQueue.armBypass(channelId)) {
+            sendInQueue.dismissBox(channelId);
+            sendInQueue.note(channelId, SEND_IN_COPY.pressEnterAsWritten);
+        }
+    } else sendInQueue.sendAsWritten(channelId);
+    focusBox();
+}
+
+function SendInStatus({ channelId, anchor }: { channelId: string; anchor: Anchor; }) {
+    const view = sendInQueue.view(channelId);
+    if (view === null) return null;
+    const { text, actions } = sendInStatusParts(view);
+    return (
+        <Floating anchor={anchor} kind="status">
+            <div className="subline-sendin-status" data-kind={view.kind} role="status">
+                <span>{text}</span>
+                {actions.map(a => (
+                    <button key={a} type="button" className="subline-sendin-action" onClick={() => sendInStatusAction(channelId, view.kind, a)}>
+                        {a === "tryAgain" ? SEND_IN_COPY.tryAgain : SEND_IN_COPY.sendAsWritten}
+                    </button>
+                ))}
+            </div>
+        </Floating>
+    );
+}
+
+/** A ✦ click: the Send in panel while AI is on, else the plan panel as before. */
+function sparkClick(owner: object, props: ChatBarProps | undefined): void {
+    const channelId = (props?.channel as { id?: unknown; } | undefined)?.id;
+    if (!sendInAllowed() || typeof channelId !== "string") {
+        openUpgradeForLevel();
+        return;
+    }
+    setSendInPanel(sendInPanel?.owner === owner ? null : { owner, channelId });
+}
+
 /**
  * THE ✦ BUTTON in the message box (0.2.9 spec, decision 11): the one place
  * that shows the plan state, in every state, next to the message input via
@@ -5542,8 +7261,11 @@ function forceQualityPopoverRender(message: Message) {
  *    motion (prefers-reduced-motion) gets the same colours and a still glow.
  *  - Off: the same ✦, grey. Same box, same size in every state; no text and
  *    no number on it (the hidden daily ceiling is never shown).
- *  - The hover text says the state (planState.ts); a click opens the plan
- *    panel (openUpgradeForLevel: the Link first when not linked).
+ *  - The hover text says the state (planState.ts). A click while AI is on
+ *    opens the Send in panel (sparkClick, 0.2.11); otherwise the plan panel
+ *    (openUpgradeForLevel: the Link first when not linked). While Send in is
+ *    on in the channel, its label sits next to ✦, and its status line
+ *    above the box.
  *
  * Not drawn where Discord draws no buttons (a channel the reader cannot type
  * in), and gone when the reader hides it (Vencord's right-click hide): then
@@ -5587,6 +7309,19 @@ function SparkButton(props: ChatBarProps & { isMainChat: boolean; isAnyChat: boo
     const [, redraw] = React.useReducer((n: number) => n + 1, 0);
     React.useEffect(() => subscribeEntitlement(redraw), []);
     React.useEffect(() => subscribePaymentPending(redraw), []);
+    // Send in: the label, the panel and the status line follow their state.
+    React.useEffect(() => subscribeSendIn(redraw), []);
+    React.useEffect(() => sendInQueue.subscribe(redraw), []);
+    React.useEffect(() => subscribePanel(redraw), []);
+    /** This button, as the panel's owner (the main box and the side box each have one). */
+    const owner = React.useRef({}).current;
+    /** The ✦ itself: where the panel and the status line are placed. */
+    const glyph = React.useRef<HTMLSpanElement | null>(null);
+    // A panel left open by a button that is gone (the box closed) is closed.
+    React.useEffect(() => () => {
+        sparkBoxes.delete(owner);
+        if (sendInPanel?.owner === owner) setSendInPanel(null);
+    }, []);
     React.useEffect(() => {
         const id = setInterval(redraw, 60_000);
         return () => clearInterval(id);
@@ -5611,10 +7346,19 @@ function SparkButton(props: ChatBarProps & { isMainChat: boolean; isAnyChat: boo
     }, [endsAt]);
     // The edit box and other small bars: only the main and side message boxes.
     if (props?.isAnyChat === false) return null;
-    return (
-        <ChatBarButton tooltip={view.hover} onClick={() => openUpgradeForLevel()}>
+    const channelId = (props?.channel as { id?: unknown; } | undefined)?.id;
+    const panelOpen = typeof channelId === "string" && sendInPanel?.owner === owner && sendInPanel.channelId === channelId && sendInAllowed();
+    // No hover text while the panel is open: Discord's tooltip ("AI
+    // translation on") would sit over the panel, and Vencord's button never
+    // hides it on a click. With no text Discord drops it and forgets it was
+    // shown (its Tooltip resets on a null text), so it only comes back on
+    // the next hover after the panel has closed.
+    const tooltip = panelOpen ? undefined : view.hover;
+    const button = (
+        <ChatBarButton tooltip={tooltip as string} onClick={() => sparkClick(owner, props)}>
             <style>{SPARK_CSS}</style>
             <span
+                ref={glyph}
                 className={`${SPARK_CLASS} ${SPARK_CLASS}-${view.on ? "on" : "off"}`}
                 data-subline-spark={view.on ? "on" : "off"}
                 aria-hidden="true"
@@ -5622,6 +7366,21 @@ function SparkButton(props: ChatBarProps & { isMainChat: boolean; isAnyChat: boo
                 ✦
             </span>
         </ChatBarButton>
+    );
+    if (typeof channelId !== "string") return button;
+    sparkBoxes.set(owner, { channelId, glyph });
+    const labelShown = sendInOn(channelId);
+    const statusShown = sendInQueue.view(channelId) !== null;
+    if (!panelOpen && !labelShown && !statusShown) return button;
+    const close = () => { if (sendInPanel?.owner === owner) setSendInPanel(null); };
+    return (
+        <>
+            <style>{SEND_IN_CSS}</style>
+            {labelShown ? <SendInLabel channelId={channelId} onOpen={() => sparkClick(owner, props)} /> : null}
+            {button}
+            {statusShown ? <SendInStatus channelId={channelId} anchor={glyph} /> : null}
+            {panelOpen ? <SendInPanel key={channelId} channelId={channelId} anchor={glyph} onClose={close} /> : null}
+        </>
     );
 }
 
@@ -5927,17 +7686,28 @@ function markupFor(source: string, channelId: string | null): { readable: string
  */
 function renderWithMarkup(translation: string, tokens: Array<[string, string]>, parse?: (text: string) => unknown, source = ""): unknown {
     try {
-        // Custom emoji junk out first (an id, :NAME:, a raw emoji token): a
-        // translation is shown without it, never replaced by the original.
-        const cleaned = cleanTranslation(translation, source);
-        if (cleaned.trim() === "") return null;
-        if (RAW_TOKEN.test(cleaned)) return null;
-        let restored = cleaned;
-        for (const [readable, raw] of tokens) restored = restored.split(readable).join(raw);
+        const restored = restoreMarkup(translation, tokens, source);
+        if (restored === null) return null;
         return parse ? parse(restored) : restored;
     } catch {
         return null;
     }
+}
+
+/**
+ * The translated text with readable mentions turned back into Discord's
+ * tokens, before any parser: null when nothing is left or the model answered
+ * with raw tokens of its own. Custom emoji junk (an id, :NAME:, a raw emoji
+ * token) is taken out first: a translation is shown without it, never
+ * replaced by the original.
+ */
+function restoreMarkup(translation: string, tokens: Array<[string, string]>, source: string): string | null {
+    const cleaned = cleanTranslation(translation, source);
+    if (cleaned.trim() === "") return null;
+    if (RAW_TOKEN.test(cleaned)) return null;
+    let restored = cleaned;
+    for (const [readable, raw] of tokens) restored = restored.split(readable).join(raw);
+    return restored;
 }
 
 /** Each wrapped parser's feature, for the owner's off switch. */
@@ -6215,6 +7985,86 @@ export const reportContextMenu: NavContextMenuPatchCallback = (children, props) 
     }
 };
 
+/** The id of the share item. An identifier, never shown. */
+export const SHARE_MENU_ITEM_ID = "subline-share-translation";
+
+/** The names the share image must not carry: the author's (username, display name, nickname here) and the mentioned users'. */
+function namesOf(message: Message): string[] {
+    const names: string[] = [];
+    const add = (v: unknown) => { if (typeof v === "string" && v.trim() !== "") names.push(v); };
+    let guildId: string | undefined;
+    try {
+        guildId = (ChannelStore.getChannel(message.channel_id) as { guild_id?: string; } | undefined)?.guild_id;
+    } catch {
+        guildId = undefined;
+    }
+    // Mentions come as users or, in some Discord builds, as bare ids.
+    const mentions: unknown[] = Array.isArray((message as any).mentions) ? (message as any).mentions : [];
+    const people = [message.author, ...mentions.map(m => {
+        if (typeof m !== "string") return m;
+        try { return UserStore.getUser(m); } catch { return undefined; }
+    })];
+    for (const u of people as any[]) {
+        if (!u || typeof u !== "object") continue;
+        add(u.username);
+        add(u.globalName);
+        add(u.global_name);
+        if (guildId && typeof u.id === "string") {
+            try { add(GuildMemberStore.getNick(guildId, u.id)); } catch { /* no nickname known */ }
+        }
+    }
+    return names;
+}
+
+/**
+ * "Share translation" on the message right-click menu, under "Report
+ * translation" and on exactly the same messages (a real Subline translation
+ * for the reading language). It opens a preview of the image, built from
+ * this ONE message without its author, mentions, server or links; nothing is
+ * copied until the reader presses Copy image, and nothing is ever sent. No
+ * bolder than Report. Never throws.
+ */
+export const shareContextMenu: NavContextMenuPatchCallback = (children, props) => {
+    try {
+        const message = props?.message as Message | undefined;
+        if (!message || typeof message.id !== "string") return;
+        const target = settings.store.targetLang;
+        const stored = getTranslation(makeKey(message.id, target)) as any;
+        if (!reportFor(message.content, stored, target)) return;
+        children.push(
+            <Menu.MenuItem
+                id={SHARE_MENU_ITEM_ID}
+                key={SHARE_MENU_ITEM_ID}
+                label={SHARE_COPY.menu}
+                action={() => {
+                    const card = shareCard({
+                        original: message.content,
+                        translation: stored.text,
+                        sourceLang: typeof stored.lang === "string" ? stored.lang : undefined,
+                        targetLang: target,
+                        resolvers: markupResolversFor(message.channel_id),
+                        names: namesOf(message)
+                    });
+                    if (card === null) {
+                        logger.warn("the share image had nothing left to show");
+                        toast(SHARE_COPY.saveFailed, "failure");
+                        return;
+                    }
+                    openSharePreview(card);
+                }}
+            />
+        );
+    } catch (err) {
+        logger.warn("Couldn't add the share item to the message menu.", err);
+    }
+};
+
+/** The message right-click menu: Report translation, then Share translation, each on its own. */
+export const messageContextMenu: NavContextMenuPatchCallback = (children, props) => {
+    reportContextMenu(children, props);
+    shareContextMenu(children, props);
+};
+
 export default definePlugin({
     name: "VcTranslate",
     description: "Automatically translates incoming messages and shows them as subtitles.",
@@ -6223,10 +8073,11 @@ export default definePlugin({
     authors: [{ name: "surfer", id: 0n }],
     settings,
 
-    // "Report translation" on a message's right-click menu, only on a message
-    // that shows a Subline translation. Declarative, so Vencord adds and
-    // removes it with the plugin. See reportContextMenu.
-    contextMenus: { message: reportContextMenu },
+    // "Report translation" and "Share translation" on a message's right-click
+    // menu, only on a message that shows a Subline translation. Declarative,
+    // so Vencord adds and removes them with the plugin. See reportContextMenu
+    // and shareContextMenu.
+    contextMenus: { message: messageContextMenu },
 
     renderMessageAccessory: props => (
         <TranslationAccessory message={props.message} />
@@ -6348,6 +8199,14 @@ export default definePlugin({
         render: SparkButton
     },
 
+    // Send in (0.2.11, sendIn.ts): Discord awaits this before a new message
+    // goes out (see HOW A MESSAGE IS SENT). Vencord turns on its
+    // MessageEventsAPI for it (scripts/checkPatches.mjs checks that patch
+    // with the rest).
+    onBeforeMessageSend(channelId: string, messageObj: { content?: unknown; }, options?: unknown, props?: unknown) {
+        return sendInPreSend(channelId, messageObj, options as Record<string, unknown> | undefined, props as Record<string, unknown> | undefined);
+    },
+
     messagePopoverButton: {
         icon: () => <span style={{ fontSize: "1rem" }}>🌐</span>,
         render(message: Message) {
@@ -6395,6 +8254,15 @@ export default definePlugin({
     },
 
     async start() {
+        // FIRST OF ALL, before this start writes anything: is there Subline
+        // data from before? Only an install with none may get the review
+        // request (usageDays.ts readPriorData). Awaited by loadUsage below.
+        // Vencord's settings file too: it outlives Discord's own storage, so
+        // an existing user with no Subline key left (a code, a link, a
+        // changed option) is never taken for a new one.
+        let settingsUse = true;
+        try { settingsUse = settingsShowPriorUse(settings.plain, settings.def, RELAY_ENGINE); } catch { settingsUse = true; }
+        const priorData = priorUse(settingsUse, readPriorData());
         // The preview ledger is read first and awaited by any preview press, so
         // a press during the awaits below can never overwrite it (previewSession).
         previewLedgerLoaded = false;
@@ -6402,6 +8270,16 @@ export default definePlugin({
         try { (globalThis as any)[BROWSER_LINK_SWITCH] = useBrowserLinkForTest; } catch { /* the test switch only */ }
         // Funnel steps for the owner page (events.ts): this account's install id, or nothing.
         setEventSource(eventCredentials);
+        // Send in (sendIn.ts): each channel's choice and its languages, from
+        // before, today's limit, and what the reader wrote (youWrote.ts).
+        void loadSendIn();
+        void loadSendInLimit();
+        void loadYouWrote();
+        // A long message's translation in its place, and "(sent in …)" after
+        // the reader's own Send in message (inPlace.ts). FIRST among the
+        // message's accessories (position 0): where Discord's text was.
+        inPlaceOn = true;
+        addMessageAccessory(IN_PLACE_ACCESSORY_ID, props => <InPlaceAccessory message={props.message} />, 0);
         // Every Activate / Add AI link opens the right panel while the plugin runs.
         registerUpgradeOpener(openUpgradeForLevel, openCodeEntryOrLink, linkFromSettings, { move: startMove, canMove: canMovePlan, finish: finishMoveFromSettings, canFinish: canFinishMove });
         unsubscribePanels?.();
@@ -6500,7 +8378,10 @@ export default definePlugin({
         // can no longer reach it. Say so once, with a Reload button, instead
         // of translating nothing in silence.
         unsubscribeAddonGone?.();
-        unsubscribeAddonGone = onWebAddonGone(() => showNotice(ADDON_RELOAD_COPY.notice, ADDON_RELOAD_COPY.button, () => location.reload()));
+        unsubscribeAddonGone = onWebAddonGone(() => {
+            noteWindowShown();
+            showNotice(ADDON_RELOAD_COPY.notice, ADDON_RELOAD_COPY.button, () => location.reload());
+        });
 
         // Did Subline's patches apply in this Discord? Nothing runs now: the
         // check waits for messages (or ten minutes), then reports at most once
@@ -6549,6 +8430,13 @@ export default definePlugin({
         // (enterAccount), so the first translation of the session is counted into the
         // week it belongs to.
         await loadWeeklyStats();
+        // The days used and the two asks' marks: awaited like the week, so
+        // the session's first translation counts its day. A failed read asks
+        // nothing this session.
+        windowShownThisSession = false;
+        askRunning = false;
+        await loadUsage(undefined, undefined, priorData);
+        setShareLog(why => logger.warn(why));
         // The previews already shown: their ✦ lines, and never a second charge.
         await previewLedgerReady;
         showWeeklyNoteIfDue();
@@ -6610,6 +8498,7 @@ export default definePlugin({
         FluxDispatcher.subscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.subscribe("CHANNEL_SELECT", onChannelSelect);
         FluxDispatcher.subscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoaded);
+        for (const ev of LINK_HINT_EVENTS) FluxDispatcher.subscribe(ev, onLinkHintMessages);
 
         // Catch up whatever channel is already on screen. Both catch-up
         // triggers are events that already fired before we subscribed, so
@@ -6641,6 +8530,29 @@ export default definePlugin({
 
     stop() {
         removeMessageAccessory(SURFACE_ACCESSORY_ID);
+        // Every in-place text redraws empty (Discord's own text shows), then goes.
+        inPlaceOn = false;
+        redrawSwaps();
+        removeMessageAccessory(IN_PLACE_ACCESSORY_ID);
+        __resetSwap();
+        swapParseCache.clear();
+        // Read again from Discord's text next session (a Discord update can rename it).
+        markupClass = null;
+        // Send in: nothing on its way is sent after this; the panel closes.
+        sendInPanel = null;
+        sendInLimitDay = "";
+        // Last: every ✦ button redraws with no panel and no status line.
+        // Texts already out of the box and not sent are given back.
+        giveBackUnsent(sendInQueue.reset());
+        preSends.clear();
+        lastPreSendAt.clear();
+        lastOwnSendAt.clear();
+        knownSentTexts.clear();
+        sendHookVerdict = null;
+        sendHookCheckedAt = 0;
+        sendHookBroken = false;
+        // Each ✦ button puts itself back on its next draw.
+        sparkBoxes.clear();
         resetInPlaceFlips();
         resetNameTips();
         // Asked again of the next session's first option card.
@@ -6733,6 +8645,14 @@ export default definePlugin({
         FluxDispatcher.unsubscribe("MESSAGE_UPDATE", onMessageUpdate);
         FluxDispatcher.unsubscribe("CHANNEL_SELECT", onChannelSelect);
         FluxDispatcher.unsubscribe("LOAD_MESSAGES_SUCCESS", onMessagesLoaded);
+        for (const ev of LINK_HINT_EVENTS) FluxDispatcher.unsubscribe(ev, onLinkHintMessages);
+        if (linkHintTimer !== null) clearTimeout(linkHintTimer);
+        linkHintTimer = null;
+        linkHintCache.clear();
+        linkHintVersion = 0;
+        // Message accessories are taken down with the plugin; theirs go too.
+        linkHintListeners.clear();
+        linkHintGuard = createClickGuard(LINK_HINT_CLICK_GAP_MS);
         running = false;
         qualityBatcher?.dispose();
         qualityBatcher = null;
@@ -6822,6 +8742,10 @@ export default definePlugin({
         previews.clear();
         previewPending.clear();
         __resetWeeklyStats();
+        __resetUsage();
+        setShareLog(null);
+        windowShownThisSession = false;
+        askRunning = false;
         // clearStore() has existed and worked the whole time, and the plugin
         // never called it — only the test harness did, which is why the tests
         // were better isolated than the shipped code. It drops the in-memory

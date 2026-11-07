@@ -396,8 +396,16 @@ export async function postFeedback(
  */
 export const RELAY_EVENT_URL = new URL("/v1/event", RELAY_URL).href;
 
-/** The funnel steps the relay counts (relay POST /v1/event). Nothing else is ever sent. */
-export const FUNNEL_EVENTS = ["link_prompt", "link_open", "link_done", "link_cancel", "price_seen"] as const;
+/**
+ * The HEARD-FROM answers (heardFrom.ts): the one tap a reader gave to "Where
+ * did you hear about Subline?". The relay counts one answer per install for
+ * the whole group (one shared marker), so a second answer is never counted.
+ */
+export const HEARD_EVENTS = ["heard_server", "heard_friend", "heard_reddit", "heard_video", "heard_search", "heard_store", "heard_other"] as const;
+export type HeardEvent = typeof HEARD_EVENTS[number];
+
+/** The funnel steps and answers the relay counts (relay POST /v1/event). Nothing else is ever sent. */
+export const FUNNEL_EVENTS = ["link_prompt", "link_open", "link_done", "link_cancel", "price_seen", ...HEARD_EVENTS] as const;
 export type FunnelEvent = typeof FUNNEL_EVENTS[number];
 
 export function isFunnelEvent(name: unknown): name is FunnelEvent {
@@ -769,6 +777,9 @@ export async function fetchRelayMoveFinish(
 
 /** How long one ✦ batch may take. An LLM answer can take seconds; a stall is not that. */
 export const TRANSLATE_TIMEOUT_MS = 30_000;
+
+/** How long one Send in request may take (the reader waits 8 s; the relay gives up at 6.5 s). */
+export const SEND_IN_FETCH_TIMEOUT_MS = 10_000;
 
 export async function translateWithRelay(
     req: BatchRequest,

@@ -213,3 +213,21 @@ export function openReportModal(report: TranslationReport): void {
         ));
     } catch { /* no modal: the settings box is still there */ }
 }
+
+/**
+ * The feedback box in a modal, with nothing attached (the desktop review
+ * request, REVIEW_COPY). The same box as in Settings, so its text is kept
+ * there too. False when no modal could open.
+ */
+export function openFeedbackModal(title: string): boolean {
+    try {
+        openModal((props: any) => (
+            <Modal {...props} title={title} subtitle={FEEDBACK_COPY.intro}>
+                <FeedbackBox onClose={props.onClose} />
+            </Modal>
+        ));
+        return true;
+    } catch {
+        return false;
+    }
+}

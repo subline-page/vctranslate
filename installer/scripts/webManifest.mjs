@@ -25,7 +25,7 @@
  * decision 1; linking spec decision 11).
  * Set by hand with the release, like package.json's version.
  */
-export const ADDON_VERSION = "0.2.10";
+export const ADDON_VERSION = "0.2.11";
 
 export const ADDON_NAME = "Subline";
 export const ADDON_DESCRIPTION = "Translate Discord messages into your language, right in the chat.";
@@ -113,7 +113,9 @@ export function firefoxManifest(version = ADDON_VERSION) {
                 //    email address;
                 //  - technicalAndInteraction (optional only, by Firefox's
                 //    rules): the patch health report (versions, build, failed
-                //    patches), sent only when the user allowed it (router.ts).
+                //    patches), the link and price steps and the heard-from
+                //    answer (relayEvent), each sent only when the user allowed
+                //    it (router.ts route).
                 data_collection_permissions: {
                     required: ["websiteContent", "authenticationInfo", "personallyIdentifyingInfo"],
                     optional: ["technicalAndInteraction"]

@@ -49,7 +49,9 @@ import type { EngineId } from "./types";
  * ask for a new build (helperKick.ts) belong to the installed app and its
  * background helper. Without the desktop helpers they are safe no-ops: no
  * beacon is written, no update is staged, no app signals, no helper to ask
- * (the store updates the add-on).
+ * (the store updates the add-on). The share image's clipboard write
+ * (copyImagePng) is Electron's: in a browser the page copies it itself
+ * (shareRender.ts), so here it answers false.
  *
  * A call whose function exists nowhere fails the way a broken IPC call does:
  * the network functions reject (every caller already treats that as "no
@@ -78,6 +80,7 @@ export interface DesktopOnly {
     readStagedVersion(): Promise<string | null>;
     readAppSignals(): Promise<AppSignals>;
     askHelperForUpdate(buildId: string, pluginVersion: string): Promise<AskResult>;
+    copyImagePng(dataUrl: string): Promise<boolean>;
 }
 
 /** Where the browser add-on puts its transport. */
@@ -100,6 +103,20 @@ function web(): Record<string, unknown> | null {
 /** Whether the desktop helpers are here (the desktop app), rather than a browser. */
 export function isDesktop(): boolean {
     return desktop() !== null;
+}
+
+/**
+ * Whether this page runs in Firefox (the add-on is built for Firefox too,
+ * installer/scripts/buildWeb.mjs). A missing or odd user agent is not
+ * Firefox. Never throws.
+ */
+export function isFirefox(): boolean {
+    try {
+        const ua = (globalThis as any).navigator?.userAgent;
+        return typeof ua === "string" && ua.includes("Firefox/");
+    } catch {
+        return false;
+    }
 }
 
 /**
@@ -189,5 +206,6 @@ export const transport: SublineTransport & DesktopOnly = {
     readStagedBuildId: (...args) => desktopCall("readStagedBuildId", args, null),
     readStagedVersion: (...args) => desktopCall("readStagedVersion", args, null),
     readAppSignals: (...args) => desktopCall("readAppSignals", args, NO_APP_SIGNALS),
-    askHelperForUpdate: (...args) => desktopCall("askHelperForUpdate", args, "no-helper")
+    askHelperForUpdate: (...args) => desktopCall("askHelperForUpdate", args, "no-helper"),
+    copyImagePng: (...args) => desktopCall("copyImagePng", args, false)
 };

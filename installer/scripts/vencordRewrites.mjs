@@ -302,30 +302,12 @@ export function guardSecondVencord(bundle) {
 }
 
 /**
- * Two of Vencord's own patches, widened to match Discord's code before AND
- * after PTB 661871 / Canary 661900 (2026-11-03). Upstream (1.15.15) has not
- * fixed them yet; drop each once the pinned Vencord matches both forms.
- *
- * NoticesAPI: `return!1;x=null;` became `...return!1}x=null;`. Without this
- * Discord dismisses Subline's notices (update, last day, Link bar) by itself.
- * Settings: Discord renamed the text variants (`text-sm` to `body-sm`, and
- * `text-xxs` to `footnote`); the patch only adds Vencord's version line in
- * Settings, but it must not fail.
+ * Vencord's own patches, widened when Discord's code broke them before
+ * upstream fixed them. Each entry: { file, what, from, to }, applied exactly
+ * once (the build fails if its anchor is gone). Empty since Vencord 1.15.16,
+ * which fixed NoticesAPI and Settings for Discord's 2026-11-03 change itself.
  */
-export const UPSTREAM_PATCH_FIXES = [
-    {
-        file: "src/plugins/_api/notices.ts",
-        what: "NoticesAPI NoticeStore match",
-        from: String.raw`match: /(?<=!1;)\i=null;(?=.{0,80}getPremiumSubscription\(\))/g,`,
-        to: String.raw`match: /(?<=!1[;}])\i=null;(?=.{0,80}getPremiumSubscription\(\))/g,`
-    },
-    {
-        file: "src/plugins/_core/settings.tsx",
-        what: "Settings COPY_VERSION match",
-        from: String.raw`match: /"text-xxs\/normal".{0,300}?`,
-        to: String.raw`match: /"(?:text-xxs|footnote)\/normal".{0,300}?`
-    }
-];
+export const UPSTREAM_PATCH_FIXES = [];
 
 /** One file's source with its UPSTREAM_PATCH_FIXES applied (anchored, see above). */
 export function fixUpstreamPatches(file, source) {

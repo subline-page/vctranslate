@@ -41,6 +41,20 @@ export function languageLabel(code: string): string {
     return `${own} (${english})`;
 }
 
+/** A language's English and own names ("Burmese", "မြန်မာ"); the code when ICU cannot name it. */
+export function languageNames(code: string): { english: string; native: string; } {
+    const english = displayName("en", code) ?? code;
+    return { english, native: displayName(code, code) ?? english };
+}
+
+let nameRows: { code: string; english: string; native: string; }[] | null = null;
+
+/** Every supported language with both names, for searching (Send in's panel). */
+export function languageNameRows(): readonly { code: string; english: string; native: string; }[] {
+    if (nameRows === null) nameRows = SUPPORTED_LANGUAGE_CODES.map(code => ({ code, ...languageNames(code) }));
+    return nameRows;
+}
+
 /**
  * Turn a stored value into a code in the list, or null.
  *

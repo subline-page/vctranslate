@@ -42,7 +42,8 @@ export default defineConfig({
             "@utils/Logger": stub("utils-logger.ts"),
             "@utils/native": stub("utils-native.ts"),
             "@utils/types": stub("utils-types.ts"),
-            "@webpack/common": stub("webpack-common.ts")
+            "@webpack/common": stub("webpack-common.ts"),
+            "@webpack": stub("webpack.ts")
         }
     }
 });

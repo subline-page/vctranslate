@@ -78,6 +78,18 @@ const MAX_PERSISTED = 2000;
 const persisted = new Map<string, StoredTranslation>();
 
 /**
+ * The entries read back from disk this session (the very objects). A line
+ * from an earlier session may describe a message edited since, while Discord
+ * was closed: in-place text (inPlace.ts) never stands in for such a message.
+ */
+const fromDisk = new WeakSet<object>();
+
+/** Was this entry read back from disk (not made this session)? */
+export function isFromDisk(entry: unknown): boolean {
+    return typeof entry === "object" && entry !== null && fromDisk.has(entry);
+}
+
+/**
  * What the last successful write actually put on disk, used to roll the mirror
  * back when a write fails (channels.ts's discipline: memory must never claim
  * something is persisted when it is not).
@@ -207,7 +219,10 @@ export async function loadPersistedTranslations(): Promise<void> {
     // Insertion order is oldest-first, so the tail is the newest.
     for (const [key, value] of valid.slice(-MAX_PERSISTED)) {
         if (!persisted.has(key)) persisted.set(key, value);
-        if (!cache.has(key)) cache.set(key, value);
+        if (!cache.has(key)) {
+            cache.set(key, value);
+            fromDisk.add(value);
+        }
     }
     trim(cache, MAX_ENTRIES);
     lastWritten = [...persisted.entries()];

@@ -243,6 +243,23 @@ export function tryAcquireIdleSlot(reserve = 1): boolean {
 }
 
 /**
+ * Send in's slot (index.tsx translateOutgoing): one message the reader typed
+ * and waits on, with an 8 s limit. It never waits here: behind a queue of
+ * catch-up batches (2 s to 10 s a token each) it would run out of time while
+ * the relay is healthy. It takes a free token ahead of any waiter, so the
+ * batches pace around it; with no token free it goes without one. The cost is
+ * at most one request over the gate's pace per typed message, and the relay's
+ * own limits (per minute, and 100 Send in a day) still bound it. Returns
+ * whether a token was taken. Never waits, never queues.
+ */
+export function takePrioritySlot(): boolean {
+    refill(Date.now());
+    if (tokens <= 0) return false;
+    tokens--;
+    return true;
+}
+
+/**
  * Resolves immediately if a token is available, otherwise queues and
  * resolves once the bucket refills enough to reach the front of the queue.
  */

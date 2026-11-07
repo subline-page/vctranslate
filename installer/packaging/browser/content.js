@@ -6,7 +6,7 @@
  *  1. Tell Vencord where the add-on's files are (upstream Vencord's content.js,
  *     unchanged in what it sends). Vencord loads its stylesheet from there.
  *  2. Carry the plugin's calls from the page (pageBridge.js) to the add-on's
- *     background and the answers back. Only the ten bridge methods pass;
+ *     background and the answers back. Only the bridge methods (router.ts BRIDGE_METHODS) pass;
  *     anything else is refused here, and again in the background.
  */
 (() => {
@@ -31,7 +31,8 @@
         "relayPatchHealth",
         "relaySendFeedback",
         "relayChannels",
-        "relayPrefs"
+        "relayPrefs",
+        "relayEvent"
     ];
 
     document.addEventListener(

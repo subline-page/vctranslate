@@ -1,9 +1,12 @@
 import { currentNotice, noticesQueue, popNotice, showNotice } from "@api/Notices";
 
+import { noteNoticeShown } from "./usageDays";
+
 /**
  * Subline's own notices (the activation notice, the "checking" notice, the
  * app update notice, the Link bar of a prior payer, 0.2.8, the
- * "translation paused until tomorrow" notice and the last-day notice, 0.2.9),
+ * "translation paused until tomorrow" notice and the last-day notice, 0.2.9,
+ * and the review request, usageDays.ts),
  * tracked by whether THEY are still there, not by a flag.
  *
  * WHY. Vencord's notices are one FIFO queue, and `popNotice()` dismisses
@@ -18,11 +21,18 @@ import { currentNotice, noticesQueue, popNotice, showNotice } from "@api/Notices
  * while it is on screen or still queued; the X removes it from both without
  * calling anything, which is how a close by hand is seen.
  */
-export type NoticeSlot = "activation" | "checking" | "appUpdate" | "link" | "paused" | "plan";
+export type NoticeSlot = "activation" | "checking" | "appUpdate" | "link" | "paused" | "plan" | "review";
 
 type Entry = unknown[];
 
-const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null, appUpdate: null, link: null, paused: null, plan: null };
+const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null, appUpdate: null, link: null, paused: null, plan: null, review: null };
+
+/**
+ * A Subline notice was put up this session, even one the reader has closed
+ * since: the two asks (index.tsx checkAsks) never come in such a session,
+ * and a notice closed with its X is no longer "present".
+ */
+let shownThisSession = false;
 
 const callbackOf = (entry: unknown): unknown => Array.isArray(entry) ? (entry as Entry)[3] : undefined;
 
@@ -72,15 +82,25 @@ export function putNotice(
     takeNotice(slot);
     const cb = () => onClick();
     mine[slot] = { cb, text };
+    shownThisSession = true;
+    // The review request waits 7 days after any Subline notice (usageDays.ts).
+    noteNoticeShown();
     showNotice((display ?? text) as Parameters<typeof showNotice>[0], button, cb);
 }
 
-/** Forget every slot without touching the screen (stop()). */
+/** Did a Subline notice show this session (closed since or not)? */
+export function noticeShownThisSession(): boolean {
+    return shownThisSession;
+}
+
+/** Forget every slot without touching the screen (stop()), and the session with them. */
 export function forgetNotices(): void {
+    shownThisSession = false;
     mine.activation = null;
     mine.checking = null;
     mine.appUpdate = null;
     mine.link = null;
     mine.paused = null;
     mine.plan = null;
+    mine.review = null;
 }

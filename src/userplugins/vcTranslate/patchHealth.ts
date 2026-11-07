@@ -48,7 +48,9 @@ export interface PatchHealthReport {
 }
 
 /** The plugins whose patches Subline needs: its own, and the APIs it uses. */
-export const HEALTH_PLUGINS = ["VcTranslate", "MessageAccessoriesAPI", "MessagePopoverAPI", "NoticesAPI", "Settings", "ContextMenuAPI"] as const;
+// MessageEventsAPI (0.2.11): Send in [language] (sendIn.ts) rewrites the
+// message on its way out through it.
+export const HEALTH_PLUGINS = ["VcTranslate", "MessageAccessoriesAPI", "MessagePopoverAPI", "NoticesAPI", "Settings", "ContextMenuAPI", "MessageEventsAPI"] as const;
 
 /**
  * The plugin names every relay already in the field accepts. A relay from
@@ -343,6 +345,51 @@ export async function scanFromVencord(V: any, messagesSeen: boolean, yieldFn?: (
         return await findFailedPatches({ plugins, pending, moduleSources, messagesSeen, yieldFn });
     } catch {
         return [];
+    }
+}
+
+/**
+ * Whether one patch of `plugin` (the one whose string find contains
+ * `findPart`) is in Discord now, read from the running Vencord. Used by Send
+ * in, which must never let Enter send the reader's own text under its label.
+ *   - false: still in Vencord's pending list (its find hit no module yet), or
+ *     a module its find hits no longer fits a replacement's match. Vencord
+ *     drops a patch from the pending list once its find hits, even when the
+ *     replacement then fails (patchWebpack.ts: the error is only logged), so
+ *     the pending list alone misses the likely Discord-update case.
+ *   - true: the find hits a loaded module and every replacement fits it.
+ *   - null: unknown (no Vencord internals, no such patch, or no loaded module
+ *     source holds the find).
+ * The patched source cannot be read back outside Vencord's dev build
+ * (String(factory) is the ORIGINAL source), so "fits" is the same test as the
+ * "nomatch" state above, on the original source. Scans every loaded module
+ * (synchronous): callers cache a true or false. Never throws.
+ */
+export function patchInDiscord(V: any, plugin: string, findPart: string): boolean | null {
+    try {
+        const list: unknown = V?.Plugins?.plugins?.[plugin]?.patches;
+        if (!Array.isArray(list)) return null;
+        const patch = list.find((p: any) => typeof p?.find === "string" && p.find.includes(findPart)) as PatchLike | undefined;
+        if (!patch) return null;
+        const pending: unknown = V?.WebpackPatcher?.patches;
+        if (Array.isArray(pending) && pending.includes(patch)) return false;
+        const m = V?.Webpack?.wreq?.m;
+        if (!m) return null;
+        let found = false;
+        for (const id of Object.keys(m)) {
+            let src: string;
+            try {
+                const f = m[id];
+                if (typeof f !== "function") continue;
+                src = String(f);
+            } catch { continue; }
+            if (!hits(patch.find, src)) continue;
+            found = true;
+            if (!replacementsApply(patch, src)) return false;
+        }
+        return found ? true : null;
+    } catch {
+        return null;
     }
 }
 

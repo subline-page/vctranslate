@@ -8,7 +8,9 @@ import { hasTransport, transport } from "./transport";
  * (its ever:ev marker, 400 days, relay/src/funnel.ts countEvent): the Link
  * bar shown, the Authorize window opened, the link done, the window closed
  * without a link, and the prices ($1.99 a month, $19.99 a year) shown to a
- * linked account with no plan. Only the step's name goes out (`{"e": name}`), with
+ * linked account with no plan. Plus the one answer to "Where did you hear
+ * about Subline?" (heardFrom.ts, engines/relay.ts HEARD_EVENTS), asked once
+ * per computer ever. Only the name goes out (`{"e": name}`), with
  * the headers every relay call carries.
  *
  * RULES. Fire and forget: sendEvent returns nothing, never awaits, never

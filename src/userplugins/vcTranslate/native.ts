@@ -3,9 +3,11 @@ import type { IpcMainInvokeEvent } from "electron";
 import { type AppSignals, cachedAppVersionReader, readAppSignalsSync } from "./appSignals";
 import {
     type FeedbackPostResult, fetchRelayChannels, fetchRelayCheckout, fetchRelayLink, fetchRelayLinkPoll, fetchRelayMoveFinish, fetchRelayMoveStart, fetchRelayPrefs, fetchRelayRedeem, fetchRelayStatus,
-    isFunnelEvent, MOVE_TICKET_RE, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed
+    isFunnelEvent, MOVE_TICKET_RE, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed,
+    SEND_IN_FETCH_TIMEOUT_MS
 } from "./engines/relay";
 import { HttpError } from "./httpError";
+import { type ElectronImageApi, writePngToClipboard } from "./imageClip";
 import type { CheckGives, PlanAccess } from "./planAccess";
 import type { ProviderRateLimit } from "./rateHint";
 import { withRetry } from "./retry";
@@ -193,8 +195,10 @@ async function runEngine(
     install?: string
 ): Promise<EngineOutcome> {
     if (engine !== "relay") throw new HttpError(`${String(engine)}: HTTP 400 engine not available in this build`, 400);
-    // The relay states the ceiling for this code on every success.
-    const out = await translateWithRelayDetailed(req, apiKey, fetch, install);
+    // The relay states the ceiling for this code on every success. A Send in
+    // message waits SEND_IN_FETCH_TIMEOUT_MS at most: the reader's own wait
+    // is 8 s, and the relay gives up on it (and gives it back) before that.
+    const out = await translateWithRelayDetailed(req, apiKey, fetch, install, isSendIn(req) ? SEND_IN_FETCH_TIMEOUT_MS : undefined);
     return {
         results: out.results,
         statedLimitPerMinute: out.rpmLimit,
@@ -202,6 +206,11 @@ async function runEngine(
         quotaCap: out.cap,
         serverNow: out.serverNow
     };
+}
+
+/** A Send in message (index.tsx translateOutgoing): one message the reader typed. */
+function isSendIn(req: BatchRequest): boolean {
+    return (req as { sendIn?: unknown; }).sendIn === true;
 }
 
 /**
@@ -232,9 +241,12 @@ export async function translateBatch(
     }
 
     try {
+        // A Send in message is never retried here: the first request may
+        // have reached the relay and been counted, and the reader's wait is
+        // over before a retry would answer. "Try again" is the only retry.
         const outcome = await withRetry(
             () => runEngine(engine, req, apiKey, install),
-            { retries: 1, delayMs: 1000, shouldRetry: isRetryable }
+            { retries: isSendIn(req) ? 0 : 1, delayMs: 1000, shouldRetry: isRetryable }
         );
         // `providerRateLimit` stays undefined: the relay reports no
         // provider count of its own (it states `rpmLimit` instead).
@@ -682,12 +694,34 @@ export async function relaySendFeedback(_: IpcMainInvokeEvent, install: string, 
 
 /**
  * Send one funnel step (events.ts) for the owner page. Here for the reason
- * relayStatus is: the renderer does no network for the relay. Only the five
- * known names go out. Never throws: true when the relay took it.
+ * relayStatus is: the renderer does no network for the relay. Only the known
+ * names (engines/relay.ts FUNNEL_EVENTS) go out. Never throws: true when the
+ * relay took it.
  */
 export async function relayEvent(_: IpcMainInvokeEvent, credential: string, install: string, name: string): Promise<boolean> {
     if (!isString(credential) || !isString(install) || !isFunnelEvent(name)) return false;
     return postEvent(credential, install, name, fetch);
+}
+
+/**
+ * Put the "Share translation" image (a PNG data URL) on the system clipboard
+ * (imageClip.ts). Desktop only: the add-on copies in the page. Electron is
+ * required here, at the call, never at load, so a test or the add-on's
+ * background never loads it. Never throws: true when the image is on the
+ * clipboard, and the reason in the main process's log when it is not.
+ */
+export async function copyImagePng(_: IpcMainInvokeEvent, dataUrl: string): Promise<boolean> {
+    let electron: ElectronImageApi | null = null;
+    try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const e = require("electron") as Partial<ElectronImageApi>;
+        if (e?.clipboard && e?.nativeImage) electron = e as ElectronImageApi;
+    } catch {
+        electron = null;
+    }
+    const failure = writePngToClipboard(dataUrl, electron);
+    if (failure !== null) console.warn(`[Subline] the share image was not copied: ${failure}`);
+    return failure === null;
 }
 
 /**

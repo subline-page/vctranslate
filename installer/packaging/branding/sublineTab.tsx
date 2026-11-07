@@ -27,10 +27,12 @@ import { hasAnyVisibleSettings, isSettingHidden } from "@api/PluginManager";
 import { useSettings } from "@api/Settings";
 import { Divider } from "@components/Divider";
 import ErrorBoundary from "@components/ErrorBoundary";
+import { Heading } from "@components/Heading";
+import { Paragraph } from "@components/Paragraph";
 import { debounce } from "@shared/debounce";
 import { Margins } from "@utils/margins";
 import { OptionType, Plugin } from "@utils/types";
-import { Alerts, Forms, React } from "@webpack/common";
+import { Alerts, React } from "@webpack/common";
 
 import { SettingsTab, wrapTab } from "../BaseTab";
 import { OptionComponentMap } from "../plugins/components";
@@ -54,12 +56,12 @@ const PLUGIN_NAME = "VcTranslate";
  */
 function RestartNotice({ onRestart }: { onRestart: () => void; }) {
     return (
-        <Forms.FormText className={Margins.top16} style={{ color: "var(--text-warning, var(--text-danger))" }}>
+        <Paragraph className={Margins.top16} style={{ color: "var(--text-warning, var(--text-danger))" }}>
             Discord needs to reload for that to take effect.{" "}
             <a role="button" onClick={onRestart} style={{ textDecoration: "underline", cursor: "pointer" }}>
                 Reload now
             </a>
-        </Forms.FormText>
+        </Paragraph>
     );
 }
 
@@ -78,11 +80,11 @@ function SublineSettings() {
     if (plugin === undefined) {
         return (
             <SettingsTab>
-                <Forms.FormTitle tag="h5">Subline is not loaded</Forms.FormTitle>
-                <Forms.FormText>
+                <Heading tag="h5">Subline is not loaded</Heading>
+                <Paragraph>
                     Subline did not start. Reinstalling Subline should fix it.
                     If it does not, the installer writes a log that names the reason.
-                </Forms.FormText>
+                </Paragraph>
             </SettingsTab>
         );
     }
@@ -91,7 +93,7 @@ function SublineSettings() {
     if (!hasAnyVisibleSettings(plugin) || !settings) {
         return (
             <SettingsTab>
-                <Forms.FormText>There is nothing to configure.</Forms.FormText>
+                <Paragraph>There is nothing to configure.</Paragraph>
             </SettingsTab>
         );
     }
@@ -128,9 +130,9 @@ function SublineSettings() {
 
     return (
         <SettingsTab>
-            <Forms.FormText className={Margins.bottom16}>
+            <Paragraph className={Margins.bottom16}>
                 {SETTINGS_COPY.top}
-            </Forms.FormText>
+            </Paragraph>
 
             <div className="vc-plugins-settings">
                 {options}
@@ -150,9 +152,9 @@ function SublineSettings() {
 
             {/* Vencord's own Divider: Forms.FormDivider is the same component typed as never (a Vesktop compat alias). */}
             <Divider className={Margins.top16} />
-            <Forms.FormText className={Margins.top8} style={{ color: "var(--text-muted)" }}>
+            <Paragraph className={Margins.top8} style={{ color: "var(--text-muted)" }}>
                 Subline v{PLUGIN_VERSION} · build {BUILD_ID}
-            </Forms.FormText>
+            </Paragraph>
         </SettingsTab>
     );
 }

@@ -3,6 +3,13 @@
 This folder is the part of [Subline](https://subline.page) that runs inside
 Discord. It reads the messages in the channel you have open. It shows an AI
 translation as a dimmed, italic line under each message in another language.
+A long message (over 280 characters or over 4 lines) shows its translation
+in its place instead, in normal text, with a small "✦ Turkish · Show
+original" after it (`inPlace.ts`). "Show original" brings Discord's text back.
+It is swapped only when everything the original shows besides words is in
+the translation too (custom emoji put back at the ends of their lines,
+mentions, links, timestamps, spoilers, code, quotes, lists, headings);
+otherwise the translation stays under the original.
 
 This file describes Subline 0.2.9. Version 0.2.9 translates only with AI (✦),
 through Subline's relay at `relay.subline.page`.
@@ -397,6 +404,9 @@ privacy page names that service and what it receives.
 - With ✦ on: the data in "What one request carries", for channels that are
   on. Also the profile, embed and name texts described above.
 - With ✦ off: only the one message you press ⚡ on, with its context.
+- With Send in on in a channel (0.2.11, `sendIn.ts`): each message you send
+  there, alone, with no context, marked `sendIn` so the relay can count it
+  (100 a day). Only when you press Enter, never while you type.
 - With nothing: no message text.
 - Version 0.2.9 never sends message text to Google or to any AI service
   directly.
@@ -442,6 +452,14 @@ out, it tells the background helper to update now.
   message. "Translating" and "not translated" markers are not saved.
 - The profile and embed cache, with the original texts (`surfaces/cache.ts`).
 - ⚡ translations made while ✦ was off: the newest 200.
+- Send in: each channel's choice, a count of the languages Subline
+  translated there, the languages you chose recently (`sendIn.ts`), and,
+  for your newest 500 messages Send in translated, what you typed and the
+  language it went out in (`youWrote.ts`, the "(sent in Turkish)" hover).
+  Never sent anywhere.
+- The days Subline was used, whether this install began on 0.2.11 or later,
+  and when the last Subline notice or window showed (`usageDays.ts`, for the
+  one review request). No text, no ids.
 - The plan record, the 🌐 choices, settings, small markers (which one-time
   messages showed, cooldowns, the rate gate's learned limit).
 

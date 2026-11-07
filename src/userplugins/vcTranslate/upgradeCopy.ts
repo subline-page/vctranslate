@@ -20,6 +20,16 @@ export function annualSavingPercent(monthlyCents: number, annualCents: number): 
 
 const ANNUAL_NOTE = `Save ${annualSavingPercent(AI_MONTHLY_CENTS, AI_ANNUAL_CENTS)}%`;
 
+/**
+ * A price in cents as the reader sees it: "$1.99", "$19.99", and "$2.00",
+ * never "$2" (always two decimals, as Dodo shows it). A sentence built from
+ * the cents above cannot drift from the products.
+ */
+export function formatUsd(cents: number): string {
+    const whole = Number.isFinite(cents) ? Math.max(0, Math.round(cents)) : 0;
+    return `$${Math.floor(whole / 100)}.${String(whole % 100).padStart(2, "0")}`;
+}
+
 export const UPGRADE_COPY = {
     /* ---- not activated ---- */
     /** A notice that stays until dismissed, shown once per session while not activated. */
@@ -150,8 +160,11 @@ export const PLAN_COPY = {
     panelTitle: "AI translation",
     /** The plan panel's close button when there is nothing to buy (subscribed, a buyer, a payment on its way). */
     ok: "OK",
-    /** The last-day notice, once per period (decision 12). Its button, and the inline "Later". */
-    lastDay: "Your AI translation ends tomorrow.",
+    /**
+     * The last-day notice, once per period (decision 12). Its button, and the
+     * inline "Later". The prices ride in the same notice: no second message.
+     */
+    lastDay: `Your AI translation ends tomorrow. Keep it for ${formatUsd(AI_MONTHLY_CENTS)} a month or ${formatUsd(AI_ANNUAL_CENTS)} a year.`,
     subscribe: "Subscribe",
     later: "Later",
     /** The ended panel, once per period. {n}: 7, or 30 for a promo. */
@@ -195,6 +208,28 @@ export const IN_PLACE_COPY = {
 } as const;
 
 /**
+ * A LONG MESSAGE TRANSLATED IN PLACE (0.2.11, index.tsx InPlaceAccessory):
+ * over 280 characters or 4 lines, the translation takes the original's place
+ * in normal message text, and a small muted marker follows it, like
+ * Discord's own "(edited)": "✦ Turkish · Show original". A click shows
+ * Discord's original again, with "✦ Show translation" under it.
+ */
+export const MESSAGE_SWAP_COPY = {
+    /** The marker's start; {lang} is the source language's English name. */
+    from: "✦ {lang}",
+    /** The marker's start when the source language is not known. */
+    fromUnknown: "✦",
+    showOriginal: "Show original",
+    /** Under Discord's original after "Show original". */
+    showTranslation: "✦ Show translation",
+    /** Discord's own "(edited)" sits in the original, which is hidden: said again after the translation. */
+    edited: "(edited)",
+    /** The hover on "✦ Turkish". */
+    title: "Translated by Subline · {lang}",
+    titleUnknown: "Translated by Subline"
+} as const;
+
+/**
  * Names and pronouns (0.2.8, surfaces/namesUi.tsx): the hover tooltip's
  * label, what it says while the translation is on its way, and the ✦ button
  * (while ✦ is on).
@@ -207,6 +242,72 @@ export const NAMES_COPY = {
 } as const;
 
 /**
+ * "Send in [language]" (0.2.11, sendIn.ts): the ✦ menu while AI is on, and
+ * the short notes when a message could not be translated before sending.
+ * Every note says the message was not sent, so nobody wonders.
+ */
+export const SEND_IN_COPY = {
+    /** The ✦ panel's name (for screen readers; no heading is drawn). */
+    heading: "Send my messages in",
+    /** The panel's search box: it also says what the panel is for. */
+    search: "Send my messages in…",
+    /** The panel's section labels. */
+    sectionChannel: "In this channel",
+    sectionRecent: "Recent",
+    sectionCommon: "Common",
+    /** The search found nothing. */
+    noMatch: "No language found",
+    /** Turns Send in off in this channel. */
+    off: "Off",
+    /** The label next to ✦ while Send in is on; {lang} is the language's English name. */
+    label: "→ {lang}",
+    /** The label's hover. */
+    labelHover: "Your messages here are sent in {lang}. Click to change.",
+    /** The label's ✕. */
+    labelOff: "Turn off Send in",
+    /** The grey label: the day's Send in messages are used up. */
+    labelLimit: "limit reached for today",
+    /** The grey label: AI translation is not on. */
+    labelNoAi: "needs AI translation",
+    /** The grey label: the relay paused AI translation until tomorrow. */
+    labelPaused: "paused until tomorrow",
+    /** The grey label: Vencord's send hook is missing after a Discord update. */
+    labelUnavailable: "not working with this Discord version",
+    /** The status line while a message is translated. */
+    sending: "Sending in {lang}…",
+    tryAgain: "Try again",
+    sendAsWritten: "Send as written",
+    /** After the first note, when more than one message was kept. */
+    more: "({n} messages)",
+    /** After "Try again" on a message with files, when Subline could not press Enter for the reader. */
+    pressEnter: "Press Enter to try again.",
+    /** After "Send as written" on a message with files. */
+    pressEnterAsWritten: "Press Enter to send as written.",
+    /** After the reader's own message Send in sent, like Discord's "(edited)"; only they see it. {lang}: the language's English name. */
+    sentIn: "(sent in {lang})",
+    /** The same, for a message whose language was not kept (the first 0.2.11 builds). */
+    sentTranslated: "(sent translated)",
+    /** The marker's hover: what the reader typed. */
+    youWrote: "You wrote: {text}",
+    failed: "Not sent. Couldn't translate.",
+    timeout: "Not sent. Translation took too long.",
+    paused: "Not sent. AI translation is paused until tomorrow. Next messages go as written.",
+    tokensLost: "Not sent. Couldn't keep the mentions and links.",
+    tooLong: "Not sent. Too long to translate.",
+    tooLongOut: "Not sent. The translation is longer than Discord allows.",
+    tooMany: "Not sent. Too many messages at once.",
+    heldBehind: "Not sent. Kept after the message before it.",
+    sendFailed: "Not sent. Discord didn't take the message.",
+    boxNotCleared: "Couldn't empty the message box. Your text is still there, not sent.",
+    limit: "Not sent. Send in limit reached for today. Next messages go as written.",
+    noAi: "Not sent. Send in needs AI translation. Next messages go as written.",
+    unavailable: "Send in doesn't work with this Discord version yet.",
+    /** Subline stopped with messages out of the box and not sent; {n} is how many. */
+    lostOnStop: "Subline stopped. {n} unsent message(s) put back in the message box.",
+    lostOnStopElsewhere: "Subline stopped. {n} unsent message(s) were not sent."
+} as const;
+
+/**
  * Linking the Discord account (0.2.8, link.ts). Every plan belongs to one
  * Discord account, and nothing translates until it is linked.
  */
@@ -214,6 +315,8 @@ export const LINK_COPY = {
     /** The bar (a notice that stays) while the account is not linked, and its button. */
     notice: "Link your Discord account to use Subline",
     button: "Link",
+    /** The small line under the newest message Subline would translate, while not linked (linkHint.ts). Its action is `button`. */
+    hint: "Link your Discord account to translate",
     /** After Authorize, in a toast. {name} is the Discord username, read locally. */
     linked: "Linked to @{name}.",
     /** 400 bad_code / 401 discord_refused, or Discord answered with no code. */
@@ -329,4 +432,70 @@ export const ELSEWHERE_COPY = {
 export const ADDON_RELOAD_COPY = {
     notice: "Subline was updated. Reload this tab to keep translating.",
     button: "Reload"
+} as const;
+
+/**
+ * The add-on's Chrome Web Store page. Kept equal to scripts/storeLinks.mjs
+ * STORE_URLS.chrome by a test: change both.
+ */
+export const CHROME_STORE_URL = "https://chromewebstore.google.com/detail/subline/eenbmffpbhjoadmigpnhidcoafmcncaa";
+/** Where the add-on's review request sends the reader: the store page's reviews. */
+export const CHROME_REVIEWS_URL = `${CHROME_STORE_URL}/reviews`;
+
+/**
+ * "SHARE TRANSLATION" (shareCard.ts, sharePanel.tsx): an image of one
+ * message and its translation, made on this computer and sent nowhere. The
+ * brand rides on the image, never on the lines in Discord.
+ */
+export const SHARE_COPY = {
+    /** The message right-click item, next to "Report translation". */
+    menu: "Share translation",
+    title: "Share translation",
+    subtitle: "The author, mentions, links and server details are left out. Check for other names before you share.",
+    copy: "Copy image",
+    cancel: "Cancel",
+    /** In place of Copy image once copying failed. */
+    save: "Save image",
+    copied: "Image copied.",
+    copyFailed: "Couldn't copy the image. Save it instead.",
+    saved: "Image saved.",
+    saveFailed: "Couldn't make the image. Try again.",
+    /** On the image. */
+    someone: "Someone",
+    mention: "@someone",
+    channel: "#channel",
+    link: "[link]",
+    /** In place of a spoiler's hidden text. */
+    spoiler: "▇▇▇",
+    footer: "✦ Translated by Subline · subline.page"
+} as const;
+
+/**
+ * THE REVIEW REQUEST (usageDays.ts): once per computer, ever. In the browser
+ * it opens the store's reviews; the desktop app has no store page, so it
+ * opens the feedback box instead. No incentive, no stars.
+ */
+export const REVIEW_COPY = {
+    storeNotice: "Is Subline useful to you? A short review helps other people find it.",
+    storeButton: "Write a review",
+    desktopNotice: "Is Subline useful to you? Tell us what you think.",
+    desktopButton: "Tell us",
+    /** The inline link that closes it. */
+    noThanks: "No thanks",
+    /** The feedback box's title when the desktop request opens it. */
+    feedbackTitle: "Tell us what you think"
+} as const;
+
+/** "Where did you hear about Subline?" (heardFrom.ts): once per computer, ever. */
+export const HEARD_COPY = {
+    title: "Where did you hear about Subline?",
+    subtitle: "One tap. Only your answer is counted.",
+    server: "A Discord server",
+    friend: "A friend",
+    reddit: "Reddit",
+    video: "YouTube or TikTok",
+    search: "A web search",
+    store: "Chrome Web Store",
+    other: "Somewhere else",
+    skip: "Skip"
 } as const;

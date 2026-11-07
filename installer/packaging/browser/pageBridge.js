@@ -48,10 +48,12 @@
         "relayPatchHealth",
         "relaySendFeedback",
         "relayChannels",
-        "relayPrefs"
+        "relayPrefs",
+        "relayEvent"
     ];
 
-    const failureFor = method => method === "relayPatchHealth" ? false : { ok: false, error: "unavailable" };
+    // A patch report and a funnel step answer a plain false (transport.ts), every other call an engine-shaped failure.
+    const failureFor = method => method === "relayPatchHealth" || method === "relayEvent" ? false : { ok: false, error: "unavailable" };
 
     try {
         if (window[GLOBAL] !== undefined) return;
@@ -122,7 +124,7 @@
 
         const transport = {};
         for (const method of METHODS) transport[method] = (...args) => call(method, args);
-        // Not enumerable: the bridge methods stay exactly the ten above.
+        // Not enumerable: the bridge methods stay exactly the list above.
         Object.defineProperty(transport, "onAddonGone", {
             enumerable: false,
             value: fn => {
