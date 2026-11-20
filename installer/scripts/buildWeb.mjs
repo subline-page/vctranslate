@@ -52,6 +52,7 @@ import {
     setBuildLabel,
     VENCORD_DIR
 } from "./vencordSource.mjs";
+import { guardBoot } from "./bootGuard.mjs";
 import { ADDON_VERSION, chromiumManifest, firefoxManifest, NETWORK_HOSTS, PACKAGED_FILES } from "./webManifest.mjs";
 
 setBuildLabel("build:web");
@@ -192,7 +193,7 @@ Built at ${new Date().toISOString()} by installer/scripts/buildWeb.mjs.
 }
 
 /** One unpacked add-on: Vencord's web build, our files, the manifest, the notices. */
-function assemble(target, manifest, files, backgroundJs, notice) {
+function assemble(target, manifest, files, backgroundJs, notice, buildId) {
     const dir = join(OUT_DIR, target);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(join(dir, "dist"), { recursive: true });
@@ -205,8 +206,10 @@ function assemble(target, manifest, files, backgroundJs, notice) {
     // esbuild's closing comment names the licence file by its build name.
     // The bundle stays off when another Vencord is already in the page
     // (vencordRewrites.mjs guardSecondVencord).
-    const vencordJs = guardSecondVencord(readFileSync(dist("extension.js"), "utf8")
-        .replace("see extension.js.LEGAL.txt */", "see Vencord.js.LEGAL.txt */"));
+    // The boot guard runs before it (bootGuard.mjs): a page left blank is
+    // reloaded once without Subline.
+    const vencordJs = guardBoot(guardSecondVencord(readFileSync(dist("extension.js"), "utf8")
+        .replace("see extension.js.LEGAL.txt */", "see Vencord.js.LEGAL.txt */")), ADDON_VERSION, buildId);
     writeFileSync(join(dir, "dist", "Vencord.js"), vencordJs);
     cpSync(dist("extension.css"), join(dir, "dist", "Vencord.css"));
     cpSync(dist("extension.js.LEGAL.txt"), join(dir, "dist", "Vencord.js.LEGAL.txt"));
@@ -308,7 +311,7 @@ async function main() {
 
     log("7/7  Verifying and packing");
     for (const [target, manifest, files] of targets) {
-        const dir = assemble(target, manifest, files, backgroundJs, notice);
+        const dir = assemble(target, manifest, files, backgroundJs, notice, stamp.buildId);
         verify(dir, manifest, stamp);
         const zipPath = join(OUT_DIR, `subline-${target}-${ADDON_VERSION}.zip`);
         const size = await zipDir(dir, zipPath);

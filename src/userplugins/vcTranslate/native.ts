@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from "electron";
 import { type AppSignals, cachedAppVersionReader, readAppSignalsSync } from "./appSignals";
 import {
     type FeedbackPostResult, fetchRelayChannels, fetchRelayCheckout, fetchRelayLink, fetchRelayLinkPoll, fetchRelayMoveFinish, fetchRelayMoveStart, fetchRelayPrefs, fetchRelayRedeem, fetchRelayStatus,
-    isFunnelEvent, MOVE_TICKET_RE, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed,
+    isFunnelEvent, MOVE_TICKET_RE, getVersionSwitch, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed,
     SEND_IN_FETCH_TIMEOUT_MS
 } from "./engines/relay";
 import { HttpError } from "./httpError";
@@ -671,6 +671,16 @@ export async function askHelperForUpdate(_: IpcMainInvokeEvent, buildId: unknown
 export async function relayPatchHealth(_: IpcMainInvokeEvent, install: string, json: string): Promise<boolean | "rejected"> {
     if (typeof install !== "string" || typeof json !== "string" || json.length > 8_192) return false;
     return postPatchHealth(install, json, fetch);
+}
+
+/**
+ * Is this Subline version switched off (engines/relay.ts getVersionSwitch)?
+ * Here for the reason relayStatus is. Called by the boot guard's switch check
+ * (desktop) and the add-on's content.js, even while Subline is off. Never
+ * throws: true, false, or null when unknown.
+ */
+export async function relaySwitch(_: IpcMainInvokeEvent, app: string): Promise<boolean | null> {
+    return getVersionSwitch(app, fetch);
 }
 
 /**

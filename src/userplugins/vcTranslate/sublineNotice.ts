@@ -1,6 +1,9 @@
 import { currentNotice, noticesQueue, popNotice, showNotice } from "@api/Notices";
+import { Logger } from "@utils/Logger";
 
 import { noteNoticeShown } from "./usageDays";
+
+const logger = new Logger("VcTranslate");
 
 /**
  * Subline's own notices (the activation notice, the "checking" notice, the
@@ -20,10 +23,30 @@ import { noteNoticeShown } from "./usageDays";
  * every show, so an identity check finds exactly ours. A notice is "present"
  * while it is on screen or still queued; the X removes it from both without
  * calling anything, which is how a close by hand is seen.
+ *
+ * VENCORD 1.15.18+ (main 4611397, "fix & improve Notices"). Discord removed
+ * the GENERIC notice type Vencord used, so no Vencord notice rendered at all
+ * (Stable, PTB and Canary, 2026-11). Since that fix a queued or current
+ * notice is one object, { id, type: "VencordNotice", message, buttonText,
+ * callback }, `currentNotice` is that object or undefined, and `popNotice()`
+ * is async (Discord's NoticeStore takes the notice down through a Flux
+ * dispatch; installer/scripts/vencordRewrites.mjs fixes two upstream bugs in
+ * it, UPSTREAM_PATCH_FIXES). The callback is still the identity.
  */
 export type NoticeSlot = "activation" | "checking" | "appUpdate" | "link" | "paused" | "plan" | "review";
 
-type Entry = unknown[];
+/** What this file reads of a Vencord notice: its button callback. */
+interface VencordNoticeEntry { callback?: unknown; }
+
+/** What Subline gives Vencord's showNotice (the one-object form; the three-argument form is deprecated). */
+interface NoticeInput { message: unknown; buttonText: string; callback: () => void; }
+
+/**
+ * Vencord's showNotice, the one-object form. Cast because the type check
+ * (tsconfig.json) may read an older Vencord whose showNotice takes three
+ * arguments; the build always uses the pinned Vencord, which takes this.
+ */
+const show = showNotice as unknown as (notice: NoticeInput) => void;
 
 const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { activation: null, checking: null, appUpdate: null, link: null, paused: null, plan: null, review: null };
 
@@ -34,10 +57,28 @@ const mine: Record<NoticeSlot, { cb: () => void; text: string; } | null> = { act
  */
 let shownThisSession = false;
 
-const callbackOf = (entry: unknown): unknown => Array.isArray(entry) ? (entry as Entry)[3] : undefined;
+const callbackOf = (entry: unknown): unknown =>
+    entry !== null && typeof entry === "object" && !Array.isArray(entry) ? (entry as VencordNoticeEntry).callback : undefined;
 
-function queue(): Entry[] {
-    return Array.isArray(noticesQueue) ? noticesQueue as Entry[] : [];
+function queue(): unknown[] {
+    return Array.isArray(noticesQueue) ? noticesQueue as unknown[] : [];
+}
+
+/**
+ * Take down the notice whose button is `cb`: the one on screen (Vencord then
+ * shows the next) or one still queued. Nothing when it is neither: it never
+ * dismisses a notice that is not this one.
+ */
+function dropNotice(cb: unknown): void {
+    if (callbackOf(currentNotice) === cb) {
+        // Async since Vencord 1.15.18. Discord's store takes it down within
+        // the same dispatch; a failure is logged, never thrown at the caller.
+        void Promise.resolve(popNotice()).catch(e => logger.error("Could not take a Subline notice down", e));
+        return;
+    }
+    const q = queue();
+    const at = q.findIndex(e => callbackOf(e) === cb);
+    if (at >= 0) q.splice(at, 1);
 }
 
 /** Is this slot's notice on screen or waiting in the queue? */
@@ -57,13 +98,7 @@ export function takeNotice(slot: NoticeSlot): void {
     const m = mine[slot];
     mine[slot] = null;
     if (m === null) return;
-    if (callbackOf(currentNotice) === m.cb) {
-        popNotice();
-        return;
-    }
-    const q = queue();
-    const at = q.findIndex(e => callbackOf(e) === m.cb);
-    if (at >= 0) q.splice(at, 1);
+    dropNotice(m.cb);
 }
 
 /**
@@ -85,7 +120,18 @@ export function putNotice(
     shownThisSession = true;
     // The review request waits 7 days after any Subline notice (usageDays.ts).
     noteNoticeShown();
-    showNotice((display ?? text) as Parameters<typeof showNotice>[0], button, cb);
+    show({ message: display ?? text, buttonText: button, callback: cb });
+}
+
+/**
+ * A notice outside the slots (index.tsx: the update, the purchase and the
+ * add-on reload notices). Its button runs `onClick` with a function that
+ * takes exactly this notice down, never another one.
+ */
+export function showLooseNotice(message: unknown, button: string, onClick: (takeDown: () => void) => void): void {
+    const cb = () => onClick(takeDown);
+    const takeDown = () => dropNotice(cb);
+    show({ message, buttonText: button, callback: cb });
 }
 
 /** Did a Subline notice show this session (closed since or not)? */

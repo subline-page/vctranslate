@@ -2,7 +2,6 @@ import { ChatBarButton, type ChatBarProps } from "@api/ChatButtons";
 import * as DataStore from "@api/DataStore";
 import { addMessageAccessory, removeMessageAccessory } from "@api/MessageAccessories";
 import { addMessagePopoverButton, removeMessagePopoverButton } from "@api/MessagePopover";
-import { popNotice, showNotice } from "@api/Notices";
 import { Logger } from "@utils/Logger";
 import definePlugin from "@utils/types";
 import { relaunch } from "@utils/native";
@@ -18,7 +17,7 @@ import { FEEDBACK_COPY, reportFor } from "./feedback";
 import { openFeedbackModal, openReportModal } from "./feedbackPanel";
 
 import { CONTEXT_RING_SIZE, createBatcher, type Batcher } from "./batcher";
-import { forgetNotices, type NoticeSlot, noticePresent, noticeShownThisSession, putNotice, takeNotice } from "./sublineNotice";
+import { forgetNotices, type NoticeSlot, noticePresent, noticeShownThisSession, putNotice, showLooseNotice, takeNotice } from "./sublineNotice";
 import { clipParentText, fitLlmRequest, joinParts, LLM_TEXT_MAX, partId, shrinkAfterRefusal, splitTextToLimit, withParentCopies } from "./fitRequest";
 import { cleanTranslation, dropCustomEmoji } from "./customEmoji";
 import { renderDiscordMarkup, type MarkupResolvers } from "./discordMarkup";
@@ -98,7 +97,7 @@ import {
 } from "./upgradePanel";
 import { createUpdateWatch, isReleaseNotesUrl, releaseNotesUrl, UPDATE_CHECK_INTERVAL_MS, UPDATE_NOTICE_COPY, type UpdateWatch } from "./updateNotice";
 import { buildNumberFromVencord, createPatchHealthWatch, HEALTH_STORE_KEY, patchInDiscord, runPatchHealthCheck, scanFromVencord, type PatchHealthWatch } from "./patchHealth";
-import { APP_DOWNLOAD_URL, APP_NOTICE_COPY, checkAppNotice } from "./appNotice";
+import { APP_DOCK_NOTICE_COPY, APP_DOWNLOAD_URL, APP_NOTICE_COPY, type AppNoticeKind, checkAppNotice } from "./appNotice";
 import { SurfaceBudget } from "./surfaces/budget";
 import { SurfaceCache } from "./surfaces/cache";
 import {
@@ -1959,25 +1958,26 @@ function showDeviceLimitNotice(force = false): void {
 }
 
 /**
- * "The installed app is too old" (appNotice.ts). A Vencord notice has one
- * button and an X, so "Later" is an inline link in the message that takes
- * only this notice down.
+ * "The installed app is too old", or on a Mac "the old app's Dock bounce"
+ * (appNotice.ts). A Vencord notice has one button and an X, so "Later" is an
+ * inline link in the message that takes only this notice down.
  */
-function showAppNotice(): void {
+function showAppNotice(kind: AppNoticeKind = "old"): void {
+    const copy = kind === "dock" ? APP_DOCK_NOTICE_COPY : APP_NOTICE_COPY;
     const later = () => takeNotice("appUpdate");
     const display = (
         <span>
-            {APP_NOTICE_COPY.text}{" "}
+            {copy.text}{" "}
             <a
                 role="button"
                 onClick={later}
                 style={{ marginLeft: 6, textDecoration: "underline", cursor: "pointer", color: "inherit" }}
             >
-                {APP_NOTICE_COPY.later}
+                {copy.later}
             </a>
         </span>
     );
-    putNotice("appUpdate", APP_NOTICE_COPY.text, APP_NOTICE_COPY.button, () => {
+    putNotice("appUpdate", copy.text, copy.button, () => {
         (globalThis as any).VencordNative?.native?.openExternal?.(APP_DOWNLOAD_URL);
         takeNotice("appUpdate");
     }, false, display);
@@ -2007,7 +2007,7 @@ function showUpdateNotice(version: string | null): void {
     );
     // A Subline notice like the others: no ask this session, none for 7 days (usageDays.ts).
     noteWindowShown();
-    showNotice(display as Parameters<typeof showNotice>[0], UPDATE_NOTICE_COPY.button, relaunch);
+    showLooseNotice(display, UPDATE_NOTICE_COPY.button, () => relaunch());
 }
 
 /**
@@ -2417,7 +2417,8 @@ function announcePurchase(): void {
     const early = earlyGrantPending;
     earlyGrantPending = false;
     noteWindowShown();
-    showNotice(early ? UPGRADE_COPY.earlyNotice : UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, popNotice);
+    // Its button takes exactly this notice down (Vencord's popNotice would take whatever is current).
+    showLooseNotice(early ? UPGRADE_COPY.earlyNotice : UPGRADE_COPY.purchasedNotice, UPGRADE_COPY.purchasedNoticeButton, takeDown => takeDown());
 }
 
 /**
@@ -6183,21 +6184,25 @@ function forceQualityPopoverRender(message: Message) {
     // outranks readiness. See TranslationAccessory's own `⚡ translating…`
     // line for the same state reflected on the message.
     //
-    // A countdown, not a count, is the only number it shows (ready /
-    // cooling / a wait): the ✦ button carries no number at all.
+    // A countdown, not a count, is the only number it shows (a wait): the ✦
+    // button carries no number at all.
+    //
+    // SHORT (owner, 2026-11-13: "soooo much text"): ready says only "Translate
+    // with AI"; a wait adds "in 0:45". Of the plan state only the days left of
+    // a running period show (where there is no message box, ⚡ is where they
+    // show); "AI translation on" is the normal case and says nothing.
     const quota = describeQuotaState(ENGINE);
-    const spendDescription = forcedInFlight.has(message.id)
-        ? "already translating…"
-        : quota.cooling
-            ? `cooling down, ${formatCountdown(quota.remainingMs)} left`
-            : quota.ready
-                ? "ready to send now"
-                : `not ready, ${formatCountdown(quota.remainingMs)} left`;
-
-    // And the plan state, as the ✦ button says it: where there is no message
-    // box (or the ✦ button is hidden), ⚡ is where the state shows.
+    const action = forcedInFlight.has(message.id)
+        ? "Translating…"
+        : !quota.cooling && quota.ready
+            ? "Translate with AI"
+            : `Translate with AI in ${formatCountdown(quota.remainingMs)}`;
+    const plan = currentPlanView();
+    const days = plan.state !== "period" || plan.daysLeft === undefined
+        ? ""
+        : plan.daysLeft === 1 ? " · 1 day left" : ` · ${plan.daysLeft} days left`;
     return {
-        label: `Translate with AI now (${spendDescription}) · ${currentPlanView().hover}`,
+        label: action + days,
         icon: () => <span style={{ fontSize: "1rem" }}>⚡</span>,
         message,
         channel,
@@ -6914,14 +6919,41 @@ function PanelCheck() {
 }
 
 /**
- * A box drawn over Discord (in document.body), kept where it belongs while
- * it is open: the panel above the chat bar, right-aligned to ✦ (like
+ * Where a box over ✦ is drawn: the document ✦ itself is in (a voice call
+ * popped out into its own window has its own document), inside the element
+ * shown full screen when there is one (a full-screen call shows nothing
+ * else). Field report 2026-11-11: ✦ in a voice channel's chat opened a panel
+ * in the main window's page, where it could not be seen.
+ */
+export function floatHost(anchorEl: Element | null | undefined): { doc: Document; win: Window; mount: Element; } | null {
+    try {
+        const doc = (anchorEl?.ownerDocument ?? (typeof document === "undefined" ? null : document)) as Document | null;
+        if (!doc) return null;
+        const win = (doc.defaultView ?? (typeof window === "undefined" ? null : window)) as Window | null;
+        const mount = (doc.fullscreenElement ?? (doc as any).webkitFullscreenElement ?? doc.body) as Element | null;
+        return win && mount ? { doc, win, mount } : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * A box drawn over Discord (in the body of ✦'s own page: floatHost), kept
+ * where it belongs while it is open: the panel above the chat bar, right-aligned to ✦ (like
  * Discord's emoji picker), the status line just above the message box.
  */
 function Floating({ anchor, kind, children }: { anchor: Anchor; kind: "panel" | "status"; children: any; }) {
     const el = React.useRef<HTMLDivElement | null>(null);
+    // ✦ is drawn before the box, so its page is known at the first draw; the
+    // check after drawing moves the box if ✦'s page changed (or was unknown).
+    const [host, setHost] = React.useState(() => floatHost(anchor.current));
     React.useEffect(() => {
-        if (typeof window === "undefined" || typeof requestAnimationFrame !== "function") return;
+        const now = floatHost(anchor.current);
+        if (now && (now.doc !== host?.doc || now.mount !== host?.mount)) setHost(now);
+    });
+    React.useEffect(() => {
+        const win = host?.win;
+        if (!win || typeof win.requestAnimationFrame !== "function") return;
         let raf = 0;
         const place = () => {
             const a = anchor.current;
@@ -6930,10 +6962,10 @@ function Floating({ anchor, kind, children }: { anchor: Anchor; kind: "panel" | 
                 const r = a.getBoundingClientRect();
                 const areaEl = (a.closest?.('[class*="channelTextArea"]') ?? a.closest?.("form") ?? a) as HTMLElement;
                 const area = areaEl.getBoundingClientRect();
-                const bottom = `${Math.max(0, window.innerHeight - area.top + (kind === "panel" ? 8 : 4))}px`;
+                const bottom = `${Math.max(0, win.innerHeight - area.top + (kind === "panel" ? 8 : 4))}px`;
                 if (me.style.bottom !== bottom) me.style.bottom = bottom;
                 if (kind === "panel") {
-                    const right = `${Math.max(8, window.innerWidth - (sparkButtonOf(a) ?? a).getBoundingClientRect().right)}px`;
+                    const right = `${Math.max(8, win.innerWidth - (sparkButtonOf(a) ?? a).getBoundingClientRect().right)}px`;
                     if (me.style.right !== right) me.style.right = right;
                 } else {
                     const left = `${Math.max(0, area.left + 8)}px`;
@@ -6943,17 +6975,17 @@ function Floating({ anchor, kind, children }: { anchor: Anchor; kind: "panel" | 
                 const shown = r.width > 0 || r.height > 0 ? "visible" : "hidden";
                 if (me.style.visibility !== shown) me.style.visibility = shown;
             }
-            raf = requestAnimationFrame(place);
+            raf = win.requestAnimationFrame(place);
         };
         place();
-        return () => cancelAnimationFrame(raf);
-    }, [kind]);
-    if (typeof document === "undefined" || !document.body) return null;
+        return () => win.cancelAnimationFrame(raf);
+    }, [kind, host]);
+    if (!host) return null;
     // Clicks inside never reach the ✦ button (React bubbles through a portal).
     const stop = (e: { stopPropagation(): void; }) => e.stopPropagation();
     return ReactDOM.createPortal(
         <div ref={el} className="subline-sendin-float" onClick={stop} onMouseDown={stop}>{children}</div>,
-        document.body
+        host.mount
     );
 }
 
@@ -6992,7 +7024,9 @@ export function SendInPanel({ channelId, anchor, onClose }: { channelId: string;
     // Click outside or Esc closes it. A click on ✦ (or the label) is left to
     // its own handler, which toggles.
     React.useEffect(() => {
-        if (typeof document === "undefined") return;
+        // ✦'s own page: a click or Esc in a popped-out call window happens there.
+        const doc = floatHost(anchor.current)?.doc;
+        if (!doc) return;
         const down = (e: MouseEvent) => {
             if (panelMousedownCloses(e.target as Node | null, panelRef.current, sparkButtonOf(anchor.current))) onClose();
         };
@@ -7003,11 +7037,11 @@ export function SendInPanel({ channelId, anchor, onClose }: { channelId: string;
             onClose();
             focusBox();
         };
-        document.addEventListener("mousedown", down, true);
-        document.addEventListener("keydown", key, true);
+        doc.addEventListener("mousedown", down, true);
+        doc.addEventListener("keydown", key, true);
         return () => {
-            document.removeEventListener("mousedown", down, true);
-            document.removeEventListener("keydown", key, true);
+            doc.removeEventListener("mousedown", down, true);
+            doc.removeEventListener("keydown", key, true);
         };
     }, []);
 
@@ -8380,7 +8414,7 @@ export default definePlugin({
         unsubscribeAddonGone?.();
         unsubscribeAddonGone = onWebAddonGone(() => {
             noteWindowShown();
-            showNotice(ADDON_RELOAD_COPY.notice, ADDON_RELOAD_COPY.button, () => location.reload());
+            showLooseNotice(ADDON_RELOAD_COPY.notice, ADDON_RELOAD_COPY.button, () => location.reload());
         });
 
         // Did Subline's patches apply in this Discord? Nothing runs now: the

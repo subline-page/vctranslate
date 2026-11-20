@@ -309,6 +309,33 @@ export async function fetchRelayRedeem(
 }
 
 /** POST /v1/patch-health: which Subline patches did not apply (patchHealth.ts). A compiled constant, like RELAY_URL. */
+/**
+ * The version switch (relay/src/versionSwitch.ts): is this Subline version
+ * turned off by the owner? Asked at every Discord start by the add-on's
+ * content.js and the desktop guard (installer/scripts/bootGuard.mjs), which
+ * store the answer for the boot guard's NEXT start. Only the version is sent.
+ */
+export const RELAY_SWITCH_URL = "https://relay.subline.page/v1/switch";
+export const SWITCH_TIMEOUT_MS = 8_000;
+const SWITCH_APP_RE = /^(?:addon\/)?\d{1,4}\.\d{1,4}\.\d{1,4}$/;
+
+/** true: switched off; false: on; null: unknown (keep what is stored). Never throws. */
+export async function getVersionSwitch(app: string, fetchImpl: typeof fetch = fetch, timeoutMs: number = SWITCH_TIMEOUT_MS): Promise<boolean | null> {
+    if (typeof app !== "string" || !SWITCH_APP_RE.test(app)) return null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const res = await fetchImpl(`${RELAY_SWITCH_URL}?app=${encodeURIComponent(app)}`, { method: "GET", signal: controller.signal });
+        if (!res.ok) return null;
+        const body = await res.json() as { ok?: unknown; off?: unknown; };
+        return body?.ok === true && typeof body.off === "boolean" ? body.off : null;
+    } catch {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 export const RELAY_PATCH_HEALTH_URL = "https://relay.subline.page/v1/patch-health";
 
 /** A patch report is diagnostics: it never waits long. */

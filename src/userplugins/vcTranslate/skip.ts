@@ -118,7 +118,7 @@ const LAUGHTER = /^(?:[jha]{4,}|k{3,}|w{3,}|(?:x+d+)+|(?:lo)+l|(?:rs){2,}|5{3,}|
 function repeatedToken(s: string): string | null {
     const tokens = s.split(/\s+/).filter(Boolean);
     if (tokens.length < 2) return null;
-    const first = tokens[0].toLowerCase();
+    const first = (tokens[0] ?? "").toLowerCase();
     return tokens.every(t => t.toLowerCase() === first) ? first : null;
 }
 

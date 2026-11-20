@@ -18,5 +18,7 @@ export declare const WEB_BUNDLE_TAIL: string;
 export declare const SECOND_VENCORD_COPY: string;
 export declare const SUBLINE_UPDATED_COPY: string;
 export declare function guardSecondVencord(bundle: string): string;
+export declare const NOTICES_POP_ANCHOR: string;
+export declare const NOTICES_POP_FIXED: string;
 export declare const UPSTREAM_PATCH_FIXES: { file: string; what: string; from: string; to: string }[];
 export declare function fixUpstreamPatches(file: string, source: string): string;

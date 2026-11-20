@@ -301,13 +301,87 @@ export function guardSecondVencord(bundle) {
     return out;
 }
 
+/** Upstream's dismissNotice and popNotice (src/api/Notices.tsx, Vencord main 4611397 to a846785). */
+export const NOTICES_POP_ANCHOR = [
+    "export function dismissNotice(notice?: Pick<Notice, \"id\" | \"type\">) {",
+    "    return FluxDispatcher.dispatch({ type: \"NOTICE_DISMISS\", ...notice });",
+    "}",
+    "",
+    "export async function popNotice() {",
+    "    const notice = currentNotice;",
+    "    if (notice) {",
+    "        currentNotice = undefined;",
+    "        await dismissNotice(notice);",
+    "    }",
+    "",
+    "    nextNotice();",
+    "}",
+    ""
+].join("\n");
+
 /**
- * Vencord's own patches, widened when Discord's code broke them before
- * upstream fixed them. Each entry: { file, what, from, to }, applied exactly
- * once (the build fails if its anchor is gone). Empty since Vencord 1.15.16,
- * which fixed NoticesAPI and Settings for Discord's 2026-11-03 change itself.
+ * The same two functions, fixed. Two upstream bugs (Vencord main 4611397,
+ * "fix & improve Notices", no tag yet), read against Discord's NoticeStore
+ * on Stable/PTB 677695 and Canary 678791:
+ *  1. `{ type: "NOTICE_DISMISS", ...notice }`: the notice's own `type`
+ *     ("VencordNotice") replaces the action's, so Discord's NoticeStore never
+ *     sees a dismiss. The notice's X and every popNotice() leave the LAST
+ *     notice on screen until some other Discord action recomputes the
+ *     notices (a window focus, a voice state change).
+ *  2. popNotice() clears currentNotice and, after the await, shows the next
+ *     notice ITSELF. A notice shown meanwhile (Subline replaces its own
+ *     notice: pop, then show) is then overwritten: on screen, but no longer
+ *     Vencord's currentNotice, so its X does nothing and the next notice
+ *     replaces it.
+ * Fixed: the action keeps type NOTICE_DISMISS, and popNotice leaves the next
+ * notice to NoticesAPI's NOTICE_DISMISS patch (it shows the next when Discord's
+ * store held a Vencord notice). Only when the store did not hold it (a Discord
+ * notice was showing in its place) does popNotice show the next one itself.
+ * installer/tests/noticesFix.test.ts runs both versions against Discord's
+ * real NoticeStore handlers.
  */
-export const UPSTREAM_PATCH_FIXES = [];
+export const NOTICES_POP_FIXED = [
+    "export function dismissNotice(notice?: Pick<Notice, \"id\" | \"type\">) {",
+    "    // Subline: the action's type LAST. Spread after it, a notice's own type",
+    "    // (\"VencordNotice\") replaced NOTICE_DISMISS and Discord never took it down.",
+    "    return FluxDispatcher.dispatch({ ...notice, type: \"NOTICE_DISMISS\" });",
+    "}",
+    "",
+    "export async function popNotice() {",
+    "    const notice = currentNotice;",
+    "    if (notice) {",
+    "        // Subline: Discord's NoticeStore takes the notice down and NoticesAPI's",
+    "        // NOTICE_DISMISS patch shows the next one. Only when the store did not",
+    "        // hold it (a Discord notice showed in its place) is the next shown here.",
+    "        // Never after a notice shown meanwhile: that one stays current.",
+    "        try {",
+    "            await dismissNotice(notice);",
+    "        } finally {",
+    "            if (currentNotice === notice) nextNotice();",
+    "        }",
+    "        return;",
+    "    }",
+    "",
+    "    nextNotice();",
+    "}",
+    ""
+].join("\n");
+
+/**
+ * Vencord's own code, fixed where Discord's newer code (or an upstream bug)
+ * breaks Subline before upstream fixes it. Each entry: { file, what, from, to },
+ * applied exactly once (the build fails if its anchor is gone). Drop an entry
+ * once the pinned Vencord has the fix. Vencord 1.15.16 fixed NoticesAPI and
+ * Settings for Discord's 2026-11-03 change itself.
+ */
+export const UPSTREAM_PATCH_FIXES = [
+    {
+        file: "src/api/Notices.tsx",
+        what: "Notices dismissNotice and popNotice",
+        from: NOTICES_POP_ANCHOR,
+        to: NOTICES_POP_FIXED
+    }
+];
 
 /** One file's source with its UPSTREAM_PATCH_FIXES applied (anchored, see above). */
 export function fixUpstreamPatches(file, source) {

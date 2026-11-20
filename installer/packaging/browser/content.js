@@ -32,7 +32,8 @@
         "relaySendFeedback",
         "relayChannels",
         "relayPrefs",
-        "relayEvent"
+        "relayEvent",
+        "relaySwitch"
     ];
 
     document.addEventListener(
@@ -94,4 +95,102 @@
             err => { clearInterval(busy); lost(err); }
         );
     });
+
+    // THE BOOT GUARD'S REPORT (installer/scripts/bootGuard.mjs). A trip the
+    // page stored (report: true) is told to the relay once, as a patch health
+    // report with the row "guard:bootGuard", which mails the owner. Sent from
+    // here because the page holds no Subline while the guard keeps it off.
+    // Kept for the next load when the add-on or the relay cannot take it now.
+    // An install id of its own (never the plugin's), for the relay's count.
+    const GUARD_KEY = "subline:bootGuard";
+    const GUARD_REPORT_DELAY_MS = 5_000;
+    let guardSending = false;
+    const reportBootTrip = () => {
+        if (guardSending) return;
+        let ls, rec;
+        try {
+            ls = window.localStorage;
+            rec = JSON.parse(ls.getItem(GUARD_KEY) || "null");
+        } catch {
+            return;
+        }
+        if (!rec || typeof rec !== "object" || rec.report !== true || !rec.bad || typeof rec.bad !== "object") return;
+        const version = String(rec.bad.v ?? ""), id = String(rec.bad.id ?? "");
+        if (!/^\d+\.\d+\.\d+$/.test(version) || !/^[0-9a-f]{16}$/.test(id)) return;
+        let install = typeof rec.install === "string" && /^free_[0-9a-f]{32}$/.test(rec.install) ? rec.install : null;
+        if (install === null) {
+            try {
+                install = "free_" + Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
+                rec.install = install;
+                ls.setItem(GUARD_KEY, JSON.stringify(rec));
+            } catch {
+                return;
+            }
+        }
+        const host = String(window.location.hostname || "");
+        const channel = host.startsWith("ptb.") ? "ptb" : host.startsWith("canary.") ? "canary" : "stable";
+        const report = { v: 1, plugin: version, build: id, channel, discordBuild: 0, failed: [{ plugin: "VcTranslate", find: "guard:bootGuard", state: "threw" }] };
+        let sent;
+        try {
+            sent = api.runtime.sendMessage({ tag: BACKGROUND_TAG, method: "relayPatchHealth", args: [install, JSON.stringify(report)] });
+        } catch {
+            return;
+        }
+        guardSending = true;
+        Promise.resolve(sent).finally(() => { guardSending = false; }).catch(() => { });
+        Promise.resolve(sent).then(reply => {
+            // true: the relay took it. "rejected": it never will. Anything else: try on the next load.
+            if (!reply || reply.ok !== true || (reply.value !== true && reply.value !== "rejected")) return;
+            try {
+                const now = JSON.parse(ls.getItem(GUARD_KEY) || "null");
+                if (now && typeof now === "object") {
+                    now.report = false;
+                    ls.setItem(GUARD_KEY, JSON.stringify(now));
+                }
+            } catch { /* told again on the next load */ }
+        }, () => { });
+    };
+    window.addEventListener("load", () => setTimeout(reportBootTrip, GUARD_REPORT_DELAY_MS), { once: true });
+    // The guard holds Subline off only after a load without Subline drew
+    // (bootGuard.mjs step 4), which can be after the report above ran: it then
+    // sends this event, and the report goes out at once. Told once: report
+    // turns false when the relay took it.
+    window.addEventListener("subline:bootGuardHeld", () => setTimeout(reportBootTrip, 0));
+
+    /*
+     * The version switch (relay versionSwitch.ts): ask once per start whether
+     * the owner turned this add-on version off, and store the answer where the
+     * boot guard reads it before Vencord starts on the NEXT start
+     * (installer/scripts/bootGuard.mjs, `off`). Asked while switched off too, so
+     * turning the version back on reaches this computer. An unknown answer
+     * (no network, relay down) keeps what is stored. Top frame only.
+     */
+    const SWITCH_DELAY_MS = 3_000;
+    const checkSwitch = () => {
+        let top = false;
+        try { top = window.top === window; } catch { top = false; }
+        if (!top) return;
+        let ls;
+        try { ls = window.localStorage; } catch { return; }
+        const version = String(api.runtime.getManifest().version || "");
+        if (!/^\d+\.\d+\.\d+$/.test(version)) return;
+        let sent;
+        try {
+            sent = api.runtime.sendMessage({ tag: BACKGROUND_TAG, method: "relaySwitch", args: ["addon/" + version] });
+        } catch {
+            return;
+        }
+        Promise.resolve(sent).then(reply => {
+            if (!reply || reply.ok !== true || typeof reply.value !== "boolean") return;
+            try {
+                const rec = JSON.parse(ls.getItem(GUARD_KEY) || "null");
+                const next = rec && typeof rec === "object" ? rec : {};
+                if (reply.value) next.off = { v: version, at: Date.now() };
+                else if (next.off === undefined) return;
+                else delete next.off;
+                ls.setItem(GUARD_KEY, JSON.stringify(next));
+            } catch { /* asked again on the next start */ }
+        }, () => { });
+    };
+    window.addEventListener("load", () => setTimeout(checkSwitch, SWITCH_DELAY_MS), { once: true });
 })();

@@ -61,9 +61,14 @@ export interface AppSignals {
     appVersion: string | null;
     /** The helper has an outstanding "could not repair" alert. */
     cannotRepair: boolean;
+    /**
+     * The main process runs on macOS (0.2.12). Absent from an older main
+     * process, which reads as not a Mac: the Mac-only notice never shows.
+     */
+    mac?: boolean;
 }
 
-export const NO_SIGNALS: AppSignals = { managed: false, appVersion: null, cannotRepair: false };
+export const NO_SIGNALS: AppSignals = { managed: false, appVersion: null, cannotRepair: false, mac: false };
 
 /** The app version out of `app-version.json` text, or null. Total. */
 export function parseAppVersion(text: string): string | null {
@@ -125,7 +130,8 @@ export function readAppSignalsSync(options: AppSignalsOptions = {}): AppSignals 
         return {
             managed,
             appVersion: versionText === null ? null : parseAppVersion(versionText),
-            cannotRepair: alertsText === null ? false : parseCannotRepair(alertsText)
+            cannotRepair: alertsText === null ? false : parseCannotRepair(alertsText),
+            mac: (options.platform ?? process.platform) === "darwin"
         };
     } catch {
         return NO_SIGNALS;

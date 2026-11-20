@@ -30,7 +30,8 @@ export const BRIDGE_METHODS = [
     "relaySendFeedback",
     "relayChannels",
     "relayPrefs",
-    "relayEvent"
+    "relayEvent",
+    "relaySwitch"
 ] as const;
 
 export type BridgeMethod = typeof BRIDGE_METHODS[number];
@@ -114,7 +115,9 @@ const SIGNATURES: Record<BridgeMethod, readonly ArgKind[]> = {
     relayPrefs: ["string", "string", "string?"],
     // A funnel step or a heard-from answer: native.ts checks the name against
     // its fixed list, so anything else is never sent.
-    relayEvent: ["string", "string", "string"]
+    relayEvent: ["string", "string", "string"],
+    // The version switch: a version name only (native.ts checks its form).
+    relaySwitch: ["string"]
 };
 
 /**

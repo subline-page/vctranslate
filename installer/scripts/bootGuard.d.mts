@@ -1,0 +1,20 @@
+/** Types for bootGuard.mjs, so the tests that run it are type-checked. */
+export declare const BOOT_GUARD_KEY: string;
+export declare const BOOT_WAIT_MS: number;
+export declare const BOOT_HOLD_MS: number;
+export declare const BOOT_RETRY_GAP_MS: number;
+export declare const BOOT_STEP_TTL_MS: number;
+export declare const BOOT_HELD_EVENT: string;
+export declare const BOOT_PAUSED_COPY: string;
+export declare const BUNDLE_NOTICE_ANCHOR: string;
+export declare const BUNDLE_START_ANCHOR: string;
+export declare function sublineBootGuard(win: unknown, version: string, consts: { key: string; wait: number; hold: number; gap: number; offHold: number; stepTtl: number; heldEvent: string; id: string; trip?: boolean }): { skip: boolean; off: boolean; probe: boolean; notice: (() => void) | null };
+export declare function bootGuardCall(version: string, buildId: string, options?: { trip?: boolean }): string;
+export declare function guardBoot(bundle: string, version: string, buildId: string): string;
+export function sublineBootSkipped(win: unknown, copy: string, key: string): void;
+export const DESKTOP_HEAD_ANCHOR: string;
+export const DESKTOP_TAIL_ANCHOR: string;
+export function guardDesktopBoot(renderer: string, version: string, buildId: string): string;
+export const BOOT_OFF_HOLD_MS: number;
+export const BOOT_OFF_COPY: string;
+export function sublineSwitchCheck(win: unknown, version: string, key: string): void;

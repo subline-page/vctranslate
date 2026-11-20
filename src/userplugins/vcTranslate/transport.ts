@@ -38,6 +38,7 @@ import type { EngineId } from "./types";
  *   relayChannels(credential, install, json?)                         -> RelayChannelsResult (GET without json, POST with it)
  *   relayPrefs(credential, install, json?)                            -> RelayPrefsResult (GET without json, POST with it)
  *   relayEvent(credential, install, name)                             -> boolean (a funnel step; false when not sent)
+ *   relaySwitch(app)                                                  -> true | false | null (the version switch; null when unknown)
  *
  * Each returns a Promise and should never reject (a failure is `{ ok: false }`
  * or `false`, as on the desktop). Every request to the relay carries the
@@ -67,6 +68,7 @@ export interface SublineTransport {
     relayCheckout(code: string, plan: string, install?: string): Promise<RelayCheckoutResponse>;
     relayRedeem(install: string, promo: string): Promise<RelayRedeemResponse>;
     relayPatchHealth(install: string, json: string): Promise<boolean | "rejected">;
+    relaySwitch(app: string): Promise<boolean | null>;
     relaySendFeedback(install: string, json: string): Promise<FeedbackPostResult>;
     relayChannels(credential: string, install: string, json?: string): Promise<RelayChannelsResult>;
     relayPrefs(credential: string, install: string, json?: string): Promise<RelayPrefsResult>;
@@ -87,7 +89,7 @@ export interface DesktopOnly {
 export const WEB_TRANSPORT_GLOBAL = "__sublineWebTransport";
 
 /** No app signals: the same answer appSignals.ts gives for an unmanaged install. */
-const NO_APP_SIGNALS: AppSignals = { managed: false, appVersion: null, cannotRepair: false };
+const NO_APP_SIGNALS: AppSignals = { managed: false, appVersion: null, cannotRepair: false, mac: false };
 
 /** The desktop helpers (native.ts in the main process), or null in a browser. */
 function desktop(): Record<string, unknown> | null {
@@ -175,6 +177,10 @@ export const transport: SublineTransport & DesktopOnly = {
     relayMoveFinish: (...args) => call("relayMoveFinish", args),
     relayCheckout: (...args) => call("relayCheckout", args),
     relayRedeem: (...args) => call("relayRedeem", args),
+    relaySwitch: async (...args) => {
+        const fn = pick("relaySwitch");
+        return fn === null ? null : await fn(...args);
+    },
     relayPatchHealth: async (...args) => {
         const fn = pick("relayPatchHealth");
         return fn === null ? false : await fn(...args);

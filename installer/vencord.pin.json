@@ -11,9 +11,13 @@
         "full object id is the only pin that makes 'which Vencord is in this bundle'",
         "answerable years later. 'version' is upstream's own package.json version and",
         "is cross-checked at build time, so a pin whose two halves disagree fails the",
-        "build instead of shipping."
+        "build instead of shipping.",
+        "",
+        "The commit may be AHEAD of the release tag that 'version' names: a fix on",
+        "Vencord main that no tag has yet. 'version' is then still the package.json",
+        "version at that commit, and the next tag (a higher version) contains it."
     ],
     "repository": "https://github.com/Vendicated/Vencord.git",
-    "commit": "383409e6a6ec9008ee8a7496500f1e75f17824d1",
-    "version": "1.15.16"
+    "commit": "a846785482f96c50f1160a04217e1e90283d2ec1",
+    "version": "1.15.18"
 }

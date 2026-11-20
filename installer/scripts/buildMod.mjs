@@ -70,6 +70,7 @@ import {
     renderManifest,
     SOURCE_NOTICE_NAME
 } from "../src/bundle/spec.ts";
+import { guardDesktopBoot } from "./bootGuard.mjs";
 import { carryMarkerOnHostUpdate, PERSIST_FILE } from "./vencordRewrites.mjs";
 import {
     BUILD_DIR,
@@ -204,7 +205,7 @@ function main() {
     log("3d/6 Carrying Subline's marker through Vencord's host-update repatch");
     log(`     ${carryMarker()}`);
 
-    log("3e/6 Widening Vencord patches Discord's newer code broke");
+    log("3e/6 Fixing Vencord code that Discord's newer code (or an upstream bug) broke");
     log(`     ${fixUpstreamPatchSources()}`);
 
     log("4/6  Installing Vencord's dependencies and building");
@@ -226,6 +227,12 @@ function main() {
         if (!existsSync(source)) fail(`Vencord's build produced no dist/${name}.`);
         cpSync(source, join(OUT_DIR, name));
     }
+    // The boot guard (bootGuard.mjs): a Discord window left blank with Subline
+    // in it reloads once without Subline. Before the manifest, so its digest
+    // covers the guarded file.
+    const rendererPath = join(OUT_DIR, "renderer.js");
+    writeFileSync(rendererPath, guardDesktopBoot(readFileSync(rendererPath, "utf8"), stamp.version, stamp.buildId), "utf8");
+    log("     boot guard in renderer.js");
     cpSync(join(VENCORD_DIR, "LICENSE"), join(OUT_DIR, "LICENSE"));
     writeFileSync(join(OUT_DIR, SOURCE_NOTICE_NAME), sourceNotice(pin, upstreamVersion, stamp), "utf8");
 
@@ -250,6 +257,7 @@ function main() {
     for (const needle of ["Detected Host Update", "subline-patch.json", "[Subline] Could not carry the patch marker", "discord-quit.json", "[Subline] Could not start the background helper on quit"]) {
         if (!loaderSource.includes(needle)) fail(`the built patcher.js does not contain "${needle}".`);
     }
+    if (!readFileSync(rendererPath, "utf8").includes("var sublineBoot=")) fail("the built renderer.js has no boot guard.");
     const facts = inspectBundleDir(OUT_DIR);
     if (facts.manifest === null || facts.problems.length > 0) {
         fail(`the bundle this build just produced is not installable:\n  ${facts.problems.join("\n  ")}`);

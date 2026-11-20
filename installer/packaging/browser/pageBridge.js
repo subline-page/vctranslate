@@ -49,7 +49,8 @@
         "relaySendFeedback",
         "relayChannels",
         "relayPrefs",
-        "relayEvent"
+        "relayEvent",
+        "relaySwitch"
     ];
 
     // A patch report and a funnel step answer a plain false (transport.ts), every other call an engine-shaped failure.

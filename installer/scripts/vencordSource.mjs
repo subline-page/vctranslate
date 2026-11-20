@@ -358,8 +358,8 @@ export function brandSettings() {
 }
 
 /**
- * Vencord's own patches that Discord's newer code broke, widened in place
- * (vencordRewrites.mjs UPSTREAM_PATCH_FIXES). Run after brandSettings, which
+ * Vencord's own code that Discord's newer code (or an upstream bug) broke,
+ * fixed in place (vencordRewrites.mjs UPSTREAM_PATCH_FIXES). Run after brandSettings, which
  * rewrites settings.tsx too. Anchored: a pin that moved the code fails here.
  */
 export function fixUpstreamPatchSources() {
@@ -373,7 +373,7 @@ export function fixUpstreamPatchSources() {
             fail(cause instanceof Error ? cause.message : String(cause));
         }
     }
-    return `${UPSTREAM_PATCH_FIXES.length} Vencord patches widened for Discord's newer code`;
+    return `${UPSTREAM_PATCH_FIXES.length} Vencord fix(es) applied: ${UPSTREAM_PATCH_FIXES.map(f => f.what).join("; ") || "none"}`;
 }
 
 export function prunePlugins() {

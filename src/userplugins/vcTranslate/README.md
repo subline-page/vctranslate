@@ -276,9 +276,9 @@ A line with no language label means the AI named no real language
 now, and the request is forced: the AI must translate it, never skip it.
 
 - **With ✦ on**, ⚡ is on every message, also one that already has a ✦ line.
-  Its label says whether a press would send now. It also says the plan
-  state. Example: "Translate with AI now (ready to send now) · AI translation
-  on".
+  Its label is short: "Translate with AI", or "Translate with AI in 0:45"
+  while it must wait, or "Translating…" while the request is out. In a
+  running period it adds the days left: "Translate with AI · 2 days left".
 - **With ✦ off**, ⚡ uses one of the day's 5. The label is "Translate with AI
   (4 left today)". At 0 it is "No AI translations left today · Subscribe",
   and a press opens the plan panel. Each message text gets one ⚡ translation.

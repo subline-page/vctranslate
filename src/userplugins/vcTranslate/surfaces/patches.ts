@@ -202,6 +202,10 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
     {
         surface: "profile bio in the DM side profile (non-redesign layout): translated in place, with a toggle, both About Me sites",
         source: "written against the current bundle (the DM side panel module; its redesign branch uses the About Me wrapper and is covered by the popout patch)",
+        // Canary 676152 (2026-11-17) removed this layout and this find: both
+        // bios there go through the About Me wrapper (the popout patch). The
+        // check passes that only with proof (scripts/checkPatches.mjs
+        // GONE_SPOTS). Remove this patch once Stable has the change too.
         find: "DMSidePanelWishlistItemCard",
         replacement: [
             {
