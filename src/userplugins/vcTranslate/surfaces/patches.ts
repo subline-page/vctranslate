@@ -190,7 +190,7 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
     {
         surface: "profile bio in the full profile (modal): translated in place, with a toggle",
         source: "written against the current bundle (UserProfileModalV2 renders the bio renderer directly, not the About Me wrapper the popout uses)",
-        find: "friendsSinceDate:",
+        find: "user_profile_modal_edit",
         replacement: [{
             match: /(?<=hideHeading:!\i,headingIcon:\i,children:\i\?\(0,\i\.jsx\)\(\i,\{displayProfile:\i,className:\i\.\i\}\):)(\(0,\i\.jsx\)\(\i\.\i,\{userBio:(\i),(?:guildId:[^,{}()]+,)?setLineClamp:!1\}\))/,
             // Discord 2026-10 added `guildId:<context>?.guildId` after userBio;
