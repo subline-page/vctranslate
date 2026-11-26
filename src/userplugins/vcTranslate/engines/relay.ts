@@ -82,6 +82,39 @@ export function relayAppHeaderValue(): string | null {
     }
 }
 
+/**
+ * The operating system (0.2.14), for the owner page's counts by OS
+ * (relay/src/versions.ts osOf). Only one of four words: never a version, a
+ * model or any other device detail.
+ *
+ * WHO SETS IT. native.ts in Discord's main process, from process.platform.
+ * Nothing else does, so tests and the browser add-on send no header.
+ */
+export const OS_HEADER = "x-subline-os";
+export type RelayOs = "mac" | "win" | "linux" | "other";
+
+/** process.platform as the relay's word. */
+export function osLabel(platform: unknown): RelayOs {
+    return platform === "darwin" ? "mac" : platform === "win32" ? "win" : platform === "linux" ? "linux" : "other";
+}
+
+let osSource: () => unknown = () => null;
+
+/** Name the OS for every relay request from now on. Asked on each request; it must be cheap. */
+export function setRelayOsSource(source: () => RelayOs | null): void {
+    osSource = source;
+}
+
+/** The header's value, or null to leave it out. Never throws: a request never fails over this. */
+export function relayOsHeaderValue(): RelayOs | null {
+    try {
+        const v = osSource();
+        return v === "mac" || v === "win" || v === "linux" || v === "other" ? v : null;
+    } catch {
+        return null;
+    }
+}
+
 /** Optional extras on a v2 status request. */
 export interface StatusOptions {
     prior?: boolean;
@@ -99,6 +132,8 @@ export function relayHeaders(credential: string, install?: string, json = false,
     if (install) h[INSTALL_HEADER] = install;
     const app = relayAppHeaderValue();
     if (app !== null) h[APP_HEADER] = app;
+    const os = relayOsHeaderValue();
+    if (os !== null) h[OS_HEADER] = os;
     if (options.prior) h[PRIOR_HEADER] = "1";
     if (options.check) h[CHECK_HEADER] = "1";
     if (json) h["content-type"] = "application/json";

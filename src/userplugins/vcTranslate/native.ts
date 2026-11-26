@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent } from "electron";
 import { type AppSignals, cachedAppVersionReader, readAppSignalsSync } from "./appSignals";
 import {
     type FeedbackPostResult, fetchRelayChannels, fetchRelayCheckout, fetchRelayLink, fetchRelayLinkPoll, fetchRelayMoveFinish, fetchRelayMoveStart, fetchRelayPrefs, fetchRelayRedeem, fetchRelayStatus,
-    isFunnelEvent, MOVE_TICKET_RE, getVersionSwitch, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, type StatusOptions, translateWithRelayDetailed,
+    isFunnelEvent, MOVE_TICKET_RE, getVersionSwitch, postEvent, postFeedback, postPatchHealth, type RelayChannelsResult, type RelayPrefsResult, type RelayStatus, setRelayAppSource, setRelayOsSource, osLabel, type StatusOptions, translateWithRelayDetailed,
     SEND_IN_FETCH_TIMEOUT_MS
 } from "./engines/relay";
 import { HttpError } from "./httpError";
@@ -33,9 +33,14 @@ import type { BatchRequest, EngineId, Result } from "./types";
  * a test or the browser add-on's background (which names itself) never reads
  * Subline's folder for it. Setting it reads nothing; the first relay request
  * does, at most once every 10 minutes after that.
+ *
+ * 0.2.14: the same place names the OS (`x-subline-os`: mac, win, linux or
+ * other), from process.platform, read once here.
  */
 if (typeof process !== "undefined" && process.versions?.electron !== undefined && (process as { type?: string }).type === "browser") {
     setRelayAppSource(cachedAppVersionReader());
+    const os = osLabel(process.platform);
+    setRelayOsSource(() => os);
     try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         noteLaunchWhenPrimary((require("electron") as { app: LaunchApp }).app);

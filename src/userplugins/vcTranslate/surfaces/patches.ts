@@ -190,6 +190,8 @@ export const SURFACE_PATCHES: SurfacePatch[] = [
     {
         surface: "profile bio in the full profile (modal): translated in place, with a toggle",
         source: "written against the current bundle (UserProfileModalV2 renders the bio renderer directly, not the About Me wrapper the popout uses)",
+        // PTB 679963 / Canary 679961 moved the bio section out of the friendsSinceDate
+        // module into one of its own; this text sits in both (Stable unchanged).
         find: "user_profile_modal_edit",
         replacement: [{
             match: /(?<=hideHeading:!\i,headingIcon:\i,children:\i\?\(0,\i\.jsx\)\(\i,\{displayProfile:\i,className:\i\.\i\}\):)(\(0,\i\.jsx\)\(\i\.\i,\{userBio:(\i),(?:guildId:[^,{}()]+,)?setLineClamp:!1\}\))/,
